@@ -35,7 +35,7 @@ def paraphrase(text: str) -> str:
         ],
         "stream": False,
         "options": {
-            "temperature": 0.8,
+            "temperature": 0.3,
             "num_ctx": 2048
         }
     }
@@ -78,7 +78,7 @@ def main():
     agent.preload_model(agent.MODEL)
 
     print(f"\n🤖 Система готова. Модель: {agent.MODEL}")
-    print("🛑 exit / quit / выход — для выхода.\n")
+    print("🛑 q / exit / quit / выход — для выхода.\n")
 
     while True:
         try:
@@ -87,7 +87,7 @@ def main():
             if not user_input:
                 continue
 
-            if user_input.lower() in {"exit", "quit", "выход"}:
+            if user_input.lower() in {"exit", "quit", "выход", "q"}:
                 print("👋 Пока!")
                 break
 
