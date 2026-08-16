@@ -24,9 +24,12 @@
 
 ## 🛠️ Требования
 
+- **ОС:** Windows 10/11, Linux или macOS
 - Python 3.10+
 - [Ollama](https://ollama.com)
 - Модель: `ollama pull qwen2.5-coder:3b`
+
+> 💡 Код проверяется и работает на **Windows** (PowerShell, пути вида `E:\progects`), но не использует платформенно-специфичных функций — всё работает и на Linux, и на macOS.
 
 ## 🚀 Быстрый старт
 
@@ -64,6 +67,7 @@ python -m chapter5.agent
 > контекста, памяти и производительности.
 
 > **Требования:**
+> - **ОС:** Windows 10/11, Linux или macOS
 > - Установленная [Ollama](https://ollama.com)
 > - Python 3.10+
 > - Любая модель Qwen2.5 Coder или аналогичная с поддержкой tools
