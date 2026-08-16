@@ -10,6 +10,7 @@
 | [Глава 2](#глава-2-добавление-распознавателя) | Мульти-агентная система | [chapter2/paraphraser.py](chapter2/paraphraser.py) |
 | [Глава 3](#глава-3-контекст-память-и-производительность) | Контекст, память и производительность | [chapter3/agent.py](chapter3/agent.py) |
 | [Глава 4](#глава-4-система-плагинов-добавляем-новые-инструменты) | Система плагинов: расширяем инструменты | [chapter4/src/tools.py](chapter4/src/tools.py) |
+| [Глава 5](#глава-5-долгосрочная-память-и-rag) | Долгосрочная память и RAG | [chapter5/agent.py](chapter5/agent.py) |
 
 ## 🎯 Что ты научишься делать
 
@@ -19,6 +20,7 @@
 - ✅ Оптимизировать память и производительность
 - ✅ Создавать расширяемую систему плагинов
 - ✅ Добавлять новые инструменты за 5 строк кода
+- ✅ Работать с векторной памятью и RAG
 
 ## 🛠️ Требования
 
@@ -47,6 +49,10 @@ python -m chapter3.agent
 
 # Запусти Главу 4 (плагины)
 python -m chapter4.agent
+
+# Запусти Главу 5 (долгосрочная память)
+pip install chromadb && ollama pull nomic-embed-text
+python -m chapter5.agent
 ```
 
 ---
@@ -70,6 +76,7 @@ python -m chapter4.agent
 - [Глава 2. Добавление распознавателя (перефразировщика)](#глава-2-добавление-распознавателя)
 - [Глава 3. Контекст, память и производительность](#глава-3-контекст-память-и-производительность)
 - [Глава 4. Система плагинов: добавляем новые инструменты](#глава-4-система-плагинов-добавляем-новые-инструменты)
+- [Глава 5. Долгосрочная память и RAG](#глава-5-долгосрочная-память-и-rag)
 - [Приложение. Шпаргалки и частые ошибки](#приложение)
 
 ---
@@ -1632,6 +1639,389 @@ python -m chapter4.agent
 
 ---
 
+---
+# Глава 5. Долгосрочная память и RAG
+## 5.1 Проблема: короткая память из Главы 3
+В Главе 3 мы добавили память между запросами через `conversation_history`,
+но она ограничена 10 сообщениями. Это создаёт проблемы:
+```text
+Вы > Прочитай README проекта
+🤖 Агент > [читает файл]
+Вы > (через 20 сообщений) Какие там были инструкции по установке?
+🤖 Агент > Я не помню, что было раньше. Контекст переполнен.
+```
+Агент не может:
+- Помнить информацию из прошлых сессий
+- Искать по всем прошлым разговорам
+- Использовать знания из документов проекта
+**Решение:** RAG (Retrieval-Augmented Generation) — агент сохраняет важную
+информацию в векторную базу и извлекает её по запросу.
+## 5.2 Что такое эмбеддинги и векторный поиск
+**Эмбеддинг** — это числовой вектор, который представляет смысл текста.
+Похожие по смыслу тексты имеют похожие векторы:
+```text
+"Как установить проект?" → [0.12, -0.45, 0.89, ..., 0.23]  (768 чисел)
+"Setup instructions"      → [0.11, -0.44, 0.88, ..., 0.22]  (похожий вектор)
+"Который час?"            → [-0.89, 0.12, -0.33, ..., 0.67]  (другой вектор)
+```
+**Векторный поиск:**
+1. Превращаем запрос в эмбеддинг
+2. Ищем в базе векторы с минимальным косинусным расстоянием
+3. Возвращаем соответствующие тексты
+```text
+Запрос: "инструкции по установке"
+↓ эмбеддинг
+Вектор: [0.12, -0.45, 0.89, ...]
+↓ поиск похожих векторов
+Результаты:
+- README.md: "Для установки выполните pip install..."
+- notes.txt: "Setup: клонируйте репозиторий..."
+```
+## 5.3 Установка ChromaDB и модели эмбеддингов
+**ChromaDB** — локальная векторная база данных. Не требует сервера, хранит всё в файлах.
+```bash
+pip install chromadb
+```
+**Модель эмбеддингов** через Ollama:
+```bash
+ollama pull nomic-embed-text
+```
+Проверка:
+```bash
+ollama list
+```
+Должна появиться:
+```text
+NAME                    ID              SIZE      MODIFIED
+nomic-embed-text:latest abc123...       274 MB    just now
+```
+## 5.4 Векторная база знаний (`src/vectorstore.py`)
+Создайте `chapter5/src/embeddings.py`:
+```python
+"""Работа с эмбеддингами через Ollama."""
+import requests
+from chapter1 import agent as base
+EMBEDDING_MODEL = "nomic-embed-text"
+def get_embedding(text: str) -> list[float]:
+"""Получает эмбеддинг для текста через Ollama."""
+response = requests.post(
+f"{base.OLLAMA_BASE}/api/embeddings",
+json={
+"model": EMBEDDING_MODEL,
+"prompt": text
+},
+timeout=30
+)
+response.raise_for_status()
+return response.json()["embedding"]
+```
+Создайте `chapter5/src/vectorstore.py`:
+```python
+"""Векторная база знаний на ChromaDB."""
+import chromadb
+from .embeddings import get_embedding
+CHROMA_PERSIST_DIR = "./chroma_db"
+COLLECTION_NAME = "agent_memory"
+# Новый API ChromaDB (версия 0.4+)
+client = chromadb.PersistentClient(path=CHROMA_PERSIST_DIR)
+def get_or_create_collection():
+"""Получает или создаёт коллекцию для хранения документов."""
+return client.get_or_create_collection(
+name=COLLECTION_NAME,
+metadata={"hnsw:space": "cosine"}  # косинусное сходство
+)
+def add_document(doc_id: str, text: str, metadata: dict = None):
+"""Добавляет документ в векторную базу."""
+collection = get_or_create_collection()
+embedding = get_embedding(text)
+collection.add(
+ids=[doc_id],
+embeddings=[embedding],
+documents=[text],
+metadatas=[metadata or {}]
+)
+def search_documents(query: str, n_results: int = 5) -> list[dict]:
+"""Ищет похожие документы по запросу."""
+collection = get_or_create_collection()
+query_embedding = get_embedding(query)
+results = collection.query(
+query_embeddings=[query_embedding],
+n_results=n_results
+)
+documents = []
+for i in range(len(results["ids"][0])):
+documents.append({
+"id": results["ids"][0][i],
+"text": results["documents"][0][i],
+"metadata": results["metadatas"][0][i],
+"distance": results["distances"][0][i]
+})
+return documents
+def list_documents(limit: int = 10) -> list[dict]:
+"""Возвращает список документов в базе (полный текст, без обрезки)."""
+collection = get_or_create_collection()
+results = collection.get(limit=limit)
+documents = []
+for i in range(len(results["ids"])):
+documents.append({
+"id": results["ids"][i],
+"text": results["documents"][i],
+"metadata": results["metadatas"][i]
+})
+return documents
+```
+> ⚠️ **Важно:** используется `chromadb.PersistentClient(path=...)`.
+> Старый API с `Settings(chroma_db_impl="duckdb+parquet")` удалён
+> в ChromaDB 0.4+ и вызывает `ValueError: deprecated configuration`.
+## 5.5 Инструменты remember, recall, list_memory
+Создайте `chapter5/src/tools.py`. Все три инструмента регистрируются
+через декоратор `@tool` из Главы 4:
+```python
+"""Плагины для работы с векторной базой знаний."""
+import hashlib
+from datetime import datetime
+from chapter4.src import tools as chapter4_tools
+from .vectorstore import add_document, search_documents, list_documents
+def _generate_id(text: str) -> str:
+"""Генерирует уникальный ID для документа."""
+return hashlib.md5(text.encode()).hexdigest()[:12]
+@chapter4_tools.tool(
+"remember",
+"сохраняет важную информацию в долгосрочную память. Используй, когда "
+"пользователь просит запомнить факт, или когда узнаёшь новый факт "
+"о проекте/настройках/предпочтениях пользователя."
+)
+def remember(content: str = "", category: str = "general", **kwargs) -> str:
+# Fallback для выдуманных параметров
+if not content and kwargs:
+content = " | ".join(f"{k}: {v}" for k, v in kwargs.items())
+if not content:
+return "Ошибка: не указан текст для сохранения. Используй параметр content."
+# Дедупликация: проверяем, нет ли уже очень похожей записи
+try:
+existing = search_documents(content, n_results=1)
+if existing and existing[0]["distance"] < 0.1:
+return f"Эта информация уже есть в памяти (ID: {existing[0]['id']})."
+except Exception:
+pass
+doc_id = _generate_id(content + datetime.now().isoformat())
+metadata = {
+"category": category,
+"timestamp": datetime.now().isoformat()
+}
+add_document(doc_id, content, metadata)
+return f"Сохранено в памяти (ID: {doc_id}, категория: {category})"
+@chapter4_tools.tool(
+"recall",
+"ищет информацию в долгосрочной памяти по ключевым словам или фразе. "
+"Используй, когда помнишь, ЧТО ищешь. Параметр query ОБЯЗАТЕЛЬНО должен быть непустым."
+)
+def recall(query: str, max_results: int = 3) -> str:
+if not query or not query.strip():
+return "Ошибка: не указан поисковый запрос. Используй параметр query."
+results = search_documents(query, n_results=max_results)
+if not results:
+return "Ничего не найдено в памяти."
+output = []
+for i, result in enumerate(results, 1):
+distance = result["distance"]
+confidence = "высокая" if distance < 0.3 else "средняя" if distance < 0.5 else "низкая"
+output.append(f"{i}. [{confidence} уверенность] {result['text']}")
+if result["metadata"].get("category"):
+output.append(f"   Категория: {result['metadata']['category']}")
+return "\n".join(output)
+@chapter4_tools.tool(
+"list_memory",
+"показывает ВСЕ сохранённые документы в памяти без поиска. Используй, когда "
+"пользователь просит 'покажи что ты помнишь', 'что у тебя в памяти', 'вспомни всё'."
+)
+def list_memory(limit: int = 10) -> str:
+docs = list_documents(limit=limit)
+if not docs:
+return "Память пуста."
+output = [f"Найдено {len(docs)} записей в памяти:\n"]
+for i, doc in enumerate(docs, 1):
+category = doc["metadata"].get("category", "без категории")
+output.append(f"{i}. [{category}] {doc['text']}")
+return "\n".join(output)
+```
+Защитные механизмы в инструментах:
+| Механизм | Где | Зачем |
+|---|---|---|
+| `**kwargs` fallback | `remember` | Модель может выдумать параметры `key`/`value` |
+| Дедупликация | `remember` | Не создавать копии уже существующих записей |
+| Проверка пустого query | `recall` | ChromaDB падает на пустом запросе |
+| Полный текст без обрезки | `list_memory` | Модель не будет "уточнять" обрезанный текст |
+## 5.6 Подключение к агенту из Главы 4
+Создайте `chapter5/agent.py`. Ядро берём из Главы 4, добавляем правила памяти:
+```python
+"""Агент с долгосрочной памятью (RAG)."""
+import requests
+from chapter1 import agent as base
+from chapter4 import agent as chapter4_agent
+from chapter5.src import tools  # плагины регистрируются при импорте
+MEMORY_RULES = r"""
+Работа с долгосрочной памятью:
+- remember, recall и list_memory — это обычные инструменты, такие же как калькулятор.
+- Пользователь просит запомнить → вызови remember.
+- Пользователь спрашивает факт, который мог сохранить ранее → вызови recall с конкретным запросом.
+- Пользователь просит показать память → вызови list_memory, затем перескажи ВСЕ возвращённые записи.
+- Показывать сохранённые записи — это нормальная разрешённая операция. Ограничений безопасности на это НЕТ.
+- Сохраняй текст на языке пользователя (по-русски, если пишет по-русски).
+Пример 1 (запомнить):
+User: Запомни, что мой проект называется firstAgent
+Assistant: {"name": "remember", "arguments": {"content": "Мой проект называется firstAgent"}}
+User: Observation from remember: Сохранено в памяти
+Assistant: Запомнил, что ваш проект называется firstAgent.
+Пример 2 (показать память):
+User: Покажи, что ты помнишь
+Assistant: {"name": "list_memory", "arguments": {}}
+User: Observation from list_memory: Найдено 2 записей в памяти:
+1. [general] Мой проект называется firstAgent
+2. [general] Меня зовут Владимир
+Assistant: Вот что я помню:
+1. [general] Мой проект называется firstAgent
+2. [general] Меня зовут Владимир
+""".strip()
+def main():
+print("=" * 60)
+print("🧠 Агент с долгосрочной памятью (Глава 5)")
+print("=" * 60)
+if not chapter4_agent.ensure_ollama_running():
+return
+if not chapter4_agent.model_exists(chapter4_agent.MODEL):
+print(f"❌ Модель '{chapter4_agent.MODEL}' не найдена.")
+return
+chapter4_agent.preload_model(chapter4_agent.MODEL)
+chapter4_agent.install_plugins()
+# Добавляем правила работы с памятью к промпту
+base.SYSTEM_PROMPT = base.SYSTEM_PROMPT + "\n" + MEMORY_RULES
+# Показываем, сколько документов уже в базе
+try:
+from chapter5.src.vectorstore import get_or_create_collection
+collection = get_or_create_collection()
+doc_count = collection.count()
+print(f"\n🧠 Модель: {chapter4_agent.MODEL}")
+print(f"💾 Векторная база: ./chroma_db ({doc_count} документов)")
+except Exception:
+print(f"\n🧠 Модель: {chapter4_agent.MODEL}")
+print(f"💾 Векторная база: ./chroma_db")
+print("🛑 exit / quit / выход — для выхода.\n")
+while True:
+try:
+user_input = input("Вы > ").strip()
+if not user_input:
+continue
+if user_input.lower() in {"exit", "quit", "выход"}:
+print("👋 Пока!")
+break
+if not chapter4_agent.VERBOSE:
+print("⏳ Думаю...")
+answer = chapter4_agent.ask_agent(user_input)
+print("\n🤖 Агент >")
+print(answer)
+print()
+except KeyboardInterrupt:
+break
+except requests.exceptions.ConnectionError:
+print("⚠️ Связь потеряна. Восстанавливаю...")
+if not chapter4_agent.ensure_ollama_running():
+break
+except Exception as e:
+print(f"Ошибка: {e}")
+if __name__ == "__main__":
+main()
+```
+## 5.7 Особенности маленьких моделей (3B)
+Мы прошли через несколько итераций отладки, прежде чем агент заработал
+стабильно. Все проблемы были связаны с особенностями модели 3B.
+### Few-shot примеры работают лучше абстрактных правил
+Модель 3B плохо следует длинным спискам правил, но отлично копирует
+конкретные примеры:
+```text
+❌ Плохо (модель игнорирует):
+"КРИТИЧЕСКИ ВАЖНО: После получения результатов от list_memory ты ОБЯЗАН
+пересказать ВСЕ записи пользователю. НЕ пропускай записи..."
+✅ Хорошо (модель следует):
+Пример:
+User: Покажи, что ты помнишь
+Assistant: {"name": "list_memory", "arguments": {}}
+User: Observation from list_memory: Найдено 2 записей...
+Assistant: Вот что я помню:
+1. [general] Мой проект называется firstAgent
+2. [general] Меня зовут Владимир
+```
+> **Эмпирическое правило: для моделей до 7B — 1 пример работает лучше, чем 5 правил.**
+### Агрессивные формулировки вызывают откат к базовому поведению
+Когда мы добавили в промпт формулировки «КРИТИЧЕСКИ ВАЖНО», «ты ОБЯЗАН»,
+«НИКОГДА», модель 3B **перегрузилась** и откатилась к базовому safety-поведению:
+```text
+Вы > Покажи, что ты помнишь
+🤖 Агент > Извините, но я не могу показать вам информацию из моей
+долгосрочной памяти. Это ограничение установлено для безопасности
+и конфиденциальности.
+```
+Модель "вспомнила", что она обучена не раскрывать "внутреннюю память",
+и проигнорировала системный промпт. Парадокс: чем жёстче мы давили,
+тем сильнее модель сопротивлялась.
+**Решение:** спокойные формулировки + явное снятие ограничений:
+```text
+Показывать сохранённые записи — это нормальная разрешённая операция.
+Ограничений безопасности на это НЕТ.
+```
+### Модель выдумывает параметры инструментов
+Если в промпте нет сигнатуры функции, модель придумывает собственные параметры:
+```text
+Модель вызывает: {"name": "remember", "arguments": {"key": "project_name", "value": "firstAgent"}}
+Функция ожидает: remember(content: str, category: str)
+Результат: ошибка "missing required argument: content" × 8 итераций
+```
+Решение — извлечение сигнатуры через `inspect.signature` (Глава 4.2)
+и добавление параметров в промпт:
+```text
+remember — сохраняет важную информацию
+Параметры: content (string, обязательно), category (string, по умолчанию: 'general')
+```
+### Модель склонна переводить на английский
+Несмотря на инструкцию «сохраняй на языке пользователя», модель 3B часто
+переводит текст на английский. Это не критично для поиска (эмбеддинги
+мультиязычные), но стоит добавить пример с русским контентом в промпт.
+### Итоговая таблица: что работает с моделью 3B
+| Приём | Эффективность |
+|---|---|
+| Few-shot примеры в промпте | ⭐⭐⭐⭐⭐ |
+| Короткие спокойные правила | ⭐⭐⭐⭐ |
+| Явное снятие ложных ограничений безопасности | ⭐⭐⭐⭐ |
+| Сигнатура функций в описании инструментов | ⭐⭐⭐⭐ |
+| Агрессивные запреты («НИКОГДА», «ОБЯЗАН») | ⭐ (вредно!) |
+| Длинные списки абстрактных правил | ⭐ (вредно!) |
+## 5.8 Уроки отладки: что пошло не так
+| Проблема | Причина | Решение |
+|---|---|---|
+| `ValueError: deprecated configuration` | Старый API ChromaDB | `chromadb.PersistentClient(path=...)` |
+| Модель выдумывает `key`/`value` | Нет сигнатуры в промпте | `inspect.signature` + параметры в промпт |
+| `list index out of range in query` | Пустой query в ChromaDB | Валидация `if not query` |
+| Дубли записей в памяти | `auto_save` + `remember` одновременно | Убрать авто-сохранение |
+| Модель отказывается показывать память | Safety-отказ из-за агрессивных формулировок | Few-shot примеры + снятие ограничений |
+| Модель переводит на английский | Базовое поведение модели | Пример с русским контентом |
+| Обрезанный текст в list_memory | `[:100]` в vectorstore | Убрать обрезку |
+## 5.9 Итоги главы
+| Критерий | Глава 3 (короткая память) | Глава 5 (RAG) |
+|---|---|---|
+| Объём памяти | 10 сообщений | Неограничен |
+| Поиск | Только по последним | Семантический по всем |
+| Между сессиями | Нет | Да (ChromaDB на диске) |
+| Структура | Список сообщений | Векторная база с категориями |
+| Влияние на контекст | Линейный рост | Constant — только релевантные записи |
+### Чек-лист для RAG-агента
+- [ ] Установлен `chromadb` и модель `nomic-embed-text`
+- [ ] Используется `PersistentClient`, а не старый API
+- [ ] Инструменты защищены от пустых/выдуманных параметров
+- [ ] Дедупликация через косинусное расстояние < 0.1
+- [ ] В промпте есть few-shot примеры, а не только правила
+- [ ] Формулировки спокойные, без «КРИТИЧЕСКИ ВАЖНО» и «ОБЯЗАН»
+
+---
 # Приложение
 
 ## Шпаргалка по командам Ollama
@@ -1666,6 +2056,10 @@ ollama ps
 | Out of memory | Большой `num_ctx` + параллельные запросы | Уменьшить `num_ctx`, поднять `OLLAMA_NUM_PARALLEL` осторожно |
 | Агент зацикливается | Модель не может завершить задачу | Уменьшить `MAX_ITERATIONS`, улучшить промпт |
 | `TypeError: unexpected keyword` | Модель передала лишний аргумент | `inspect.signature` в `execute_tool` (Глава 4.2) |
+| `ValueError: deprecated configuration` | Старый API ChromaDB | `PersistentClient(path=...)` (Глава 5.4) |
+| `list index out of range in query` | Пустой query в ChromaDB | Валидация query в инструменте (Глава 5.5) |
+| Модель отказывается показывать память | Safety-отказ из-за агрессивных формулировок | Few-shot примеры + снятие ограничений (Глава 5.7) |
+| Модель выдумывает параметры инструмента | Нет сигнатуры в промпте | `inspect.signature` + параметры в промпт (Глава 4.2, 5.7) |
 
 ## Рекомендуемые модели для агентов
 
@@ -1686,6 +2080,6 @@ ollama ps
 ---
 
 > **Дата создания туториала:** 16 августа 2026
-> **Версия:** 1.2
+> **Версия:** 1.3
 > **Автор:** Создано на основе практической сессии с Ollama + Qwen2.5 Coder
 ```

@@ -378,7 +378,18 @@ def extract_tool_calls(text: str):
                 calls.append(tool_call)
             pos = end
         except json.JSONDecodeError:
-            pos = start + 1
+            # Fallback: пробуем починить неэкранированные обратные слэши (Windows пути)
+            try:
+                sub_text = text[start:]
+                # Заменяем одинарные слэши на двойные
+                fixed_sub = sub_text.replace('\\', '\\\\')
+                obj, end = decoder.raw_decode(fixed_sub, 0)
+                tc = normalize_potential_tool(obj)
+                if tc:
+                    calls.append(tc)
+                pos = start + end
+            except Exception:
+                pos = start + 1
     return calls
 
 

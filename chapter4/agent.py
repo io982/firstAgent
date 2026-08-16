@@ -113,3 +113,18 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+# ============================================================
+# ПРОБРОС БАЗОВЫХ ФУНКЦИЙ ИЗ ГЛАВЫ 1
+# ============================================================
+# Это нужно, чтобы chapter5 мог использовать chapter4 как единый фасад
+# и не зависеть напрямую от chapter1.
+
+ensure_ollama_running = base.ensure_ollama_running
+model_exists = base.model_exists
+preload_model = base.preload_model
+ask_agent = base.ask_agent
+
+# Копируем конфигурацию
+MODEL = base.MODEL
+VERBOSE = base.VERBOSE

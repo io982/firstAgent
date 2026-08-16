@@ -23,19 +23,55 @@ import requests
 # РЕЕСТР ИНСТРУМЕНТОВ
 # ====================================================================
 
-# name -> {"func": callable, "description": str}
+import inspect
+
+# name -> {"func": callable, "description": str, "parameters": dict}
 TOOL_REGISTRY = {}
+
+
+def _extract_parameters(func) -> dict:
+    """Извлекает параметры функции через inspect.signature."""
+    sig = inspect.signature(func)
+    params = {}
+    for param_name, param in sig.parameters.items():
+        param_info = {"type": "any"}
+        
+        if param.annotation != inspect.Parameter.empty:
+            if param.annotation == str:
+                param_info["type"] = "string"
+            elif param.annotation == int:
+                param_info["type"] = "integer"
+            elif param.annotation == float:
+                param_info["type"] = "number"
+            elif param.annotation == bool:
+                param_info["type"] = "boolean"
+        
+        if param.default != inspect.Parameter.empty:
+            param_info["required"] = False
+            param_info["default"] = param.default
+        else:
+            param_info["required"] = True
+        
+        params[param_name] = param_info
+    return params
+
 
 def tool(name: str, description: str):
     """Декоратор: регистрирует функцию как инструмент агента."""
     def decorator(func):
-        TOOL_REGISTRY[name] = {"func": func, "description": description}
+        TOOL_REGISTRY[name] = {
+            "func": func,
+            "description": description,
+            "parameters": _extract_parameters(func)
+        }
         return func
     return decorator
+
 
 def known_tools() -> set:
     """Множество имён зарегистрированных инструментов."""
     return set(TOOL_REGISTRY)
+
 
 def execute_tool(name: str, args: dict) -> str:
     """Вызывает инструмент по имени, фильтруя лишние аргументы."""
@@ -45,17 +81,30 @@ def execute_tool(name: str, args: dict) -> str:
     try:
         func = entry["func"]
         sig = inspect.signature(func)
-        # Берём только те аргументы, которые функция реально принимает
         valid_args = {k: v for k, v in args.items() if k in sig.parameters}
         return str(func(**valid_args))
     except Exception as e:
         return f"Ошибка инструмента {name}: {e}"
 
+
 def render_tools_for_prompt() -> str:
-    """Собирает нумерованный список инструментов для системного промпта."""
+    """Собирает список инструментов С ПАРАМЕТРАМИ для системного промпта."""
     lines = []
     for number, (name, entry) in enumerate(TOOL_REGISTRY.items(), 1):
-        lines.append(f"{number}. {name} — {entry['description']}")
+        line = f"{number}. {name} — {entry['description']}"
+        
+        params = entry.get("parameters", {})
+        if params:
+            param_parts = []
+            for pname, pinfo in params.items():
+                if pinfo.get("required", True):
+                    param_parts.append(f'{pname} ({pinfo["type"]}, обязательно)')
+                else:
+                    default = pinfo.get("default")
+                    param_parts.append(f'{pname} ({pinfo["type"]}, по умолчанию: {default!r})')
+            line += f"\n   Параметры: {', '.join(param_parts)}"
+        
+        lines.append(line)
     return "\n".join(lines)
 
 # ====================================================================
