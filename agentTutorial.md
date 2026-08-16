@@ -71,7 +71,8 @@ python -m chapter4.agent
 1. [Глава 1. Создание простого агента](#глава-1-создание-простого-агента)
 2. [Глава 2. Добавление распознавателя (перефразировщика)](#глава-2-добавление-распознавателя)
 3. [Глава 3. Контекст, память и производительность](#глава-3-контекст-память-и-производительность)
-4. [Приложение. Шпаргалки и частые ошибки](#приложение)
+4. [Глава 4. Система плагинов: добавляем новые инструменты](#глава-4-система-плагинов-добавляем-новые-инструменты)
+5. [Приложение. Шпаргалки и частые ошибки](#приложение)
 
 ---
 
@@ -1174,6 +1175,431 @@ KEEP_ALIVE = "1m"  # выгружать через минуту простоя
 - [ ] Не загружать несколько моделей одновременно без необходимости
 - [ ] Мониторить память через `ollama ps`
 - [ ] Для параллельных запросов поднять `OLLAMA_NUM_PARALLEL` и уменьшить `num_ctx`
+
+---
+
+# Глава 4. Система плагинов: добавляем новые инструменты
+
+## 4.1 Проблема Главы 1: жёстко зашитые инструменты
+
+В Главе 1 у агента было 4 инструмента, и каждый был «вшит» в три места:
+
+```python
+# 1. Множество известных имён
+KNOWN_TOOLS = {"calculator", "list_directory", ...}
+
+# 2. Описание в системном промпте (вручную)
+SYSTEM_PROMPT = """...
+1. calculator — безопасно считает...
+2. list_directory — показывает файлы...
+"""
+
+# 3. Диспетчер if/elif
+def execute_tool(name, args):
+    if name == "calculator":
+        return calculator(...)
+    if name == "list_directory":
+        return list_directory(...)
+    # ... каждый новый инструмент = правка в трёх местах
+```
+
+Чтобы добавить один инструмент, нужно изменить **три разных места** и нигде
+не ошибиться. Это не масштабируется.
+
+**Цель Главы 4:** добавление нового инструмента должно занимать **5 строк кода**,
+и ничего больше менять не нужно.
+
+## 4.2 Решение: реестр инструментов через декораторы
+
+Паттерн «реестр» (registry): заводим словарь, в котором ключ — имя инструмента,
+значение — функция и её описание. Декоратор `@tool` автоматически кладёт
+функцию в реестр в момент определения.
+
+```python
+# name -> {"func": callable, "description": str}
+TOOL_REGISTRY = {}
+
+
+def tool(name: str, description: str):
+    """Декоратор: регистрирует функцию как инструмент агента."""
+    def decorator(func):
+        TOOL_REGISTRY[name] = {"func": func, "description": description}
+        return func
+    return decorator
+```
+
+Вспомогательные функции реестра:
+
+```python
+def known_tools() -> set:
+    """Множество имён зарегистрированных инструментов."""
+    return set(TOOL_REGISTRY)
+
+
+def execute_tool(name: str, args: dict) -> str:
+    """Вызывает инструмент по имени, передавая аргументы в функцию."""
+    entry = TOOL_REGISTRY.get(name)
+    if entry is None:
+        return f"Неизвестный инструмент: {name}"
+    try:
+        return str(entry["func"](**args))
+    except TypeError as e:
+        return f"Неверные аргументы для инструмента {name}: {e}"
+    except Exception as e:
+        return f"Ошибка инструмента {name}: {e}"
+
+
+def render_tools_for_prompt() -> str:
+    """Собирает нумерованный список инструментов для системного промпта."""
+    lines = []
+    for number, (name, entry) in enumerate(TOOL_REGISTRY.items(), 1):
+        lines.append(f"{number}. {name} — {entry['description']}")
+    return "\n".join(lines)
+```
+
+Обратите внимание: `execute_tool` больше не содержит `if/elif` по именам —
+он один и тот же для любого количества плагинов. А `render_tools_for_prompt`
+генерирует описание инструментов для промпта **автоматически** из реестра.
+
+## 4.3 Как модель сама выбирает нужный инструмент
+
+Никакой магии нет — выбор делает LLM по описаниям. Схема такая:
+
+```text
+TOOL_REGISTRY
+    ↓ render_tools_for_prompt()
+Системный промпт: "У тебя есть инструменты: 1. calculator — ... 2. ..."
+    ↓
+Модель читает запрос пользователя + описания
+    ↓
+Модель сама решает, какой инструмент подходит, и возвращает JSON:
+{"name": "search_in_directory", "arguments": {"query": "TODO"}}
+    ↓
+Ядро агента парсит JSON (Глава 1.5) и вызывает execute_tool()
+    ↓
+Реестр находит функцию по имени и передаёт аргументы через **args
+```
+
+Ключевое правило: **описание в декораторе — это то, что видит модель**.
+Чем точнее описание, тем правильнее модель выбирает инструмент. Сравните:
+
+```python
+# ❌ Плохо: модель не поймёт, когда это использовать
+@tool("do_stuff", "делает всякое")
+
+# ✅ Хорошо: понятно назначение и формат данных
+@tool("search_in_directory", "ищет текст во всех файлах директории (рекурсивно)")
+```
+
+## 4.4 Новые инструменты Главы 4
+
+К четырём инструментам из Главы 1 добавляем ещё четыре.
+
+### write_file — запись в файл
+
+```python
+@tool("write_file", "записывает текст в файл (создаёт или перезаписывает)")
+def write_file(path: str, content: str) -> str:
+    path = os.path.abspath(os.path.expanduser(path))
+    directory = os.path.dirname(path)
+    if not os.path.isdir(directory):
+        return f"Директория не найдена: {directory}"
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(content)
+    return f"Записано {len(content)} символов в {path}"
+```
+
+### search_in_directory — поиск по всей директории
+
+Рекурсивный обход через `os.walk`, пропуская служебные папки
+(`.git`, `__pycache__`, `node_modules`, `.venv`):
+
+```python
+SKIP_DIRS = {".git", "__pycache__", "node_modules", ".venv", "venv"}
+
+
+@tool("search_in_directory", "ищет текст во всех файлах директории (рекурсивно)")
+def search_in_directory(path: str = ".", query: str = "", max_results: int = 30) -> str:
+    path = os.path.abspath(os.path.expanduser(path))
+    if not os.path.isdir(path):
+        return f"Директория не найдена: {path}"
+    if not query:
+        return "Не указан текст для поиска"
+
+    results = []
+    query_lower = query.lower()
+
+    for root, dirs, files in os.walk(path):
+        # Пропускаем служебные директории
+        dirs[:] = [d for d in dirs if d not in SKIP_DIRS]
+
+        for name in sorted(files):
+            if len(results) >= max_results:
+                break
+            full_path = os.path.join(root, name)
+            try:
+                matches_in_file = 0
+                with open(full_path, "r", encoding="utf-8", errors="ignore") as f:
+                    for line_number, line in enumerate(f, start=1):
+                        if query_lower in line.lower():
+                            relative = os.path.relpath(full_path, path)
+                            results.append(f"{relative}:{line_number}: {line.rstrip()}")
+                            matches_in_file += 1
+                            # Не больше 3 совпадений на файл
+                            if matches_in_file >= 3:
+                                break
+            except OSError:
+                continue
+
+        if len(results) >= max_results:
+            break
+
+    if not results:
+        return f"Ничего не найдено: {query}"
+    if len(results) >= max_results:
+        results.append(f"... [показаны первые {max_results}] ...")
+    return "\n".join(results)
+```
+
+### run_command — выполнение команд с подтверждением
+
+> 🔒 **Главное правило безопасности Главы 4:** агент НИКОГДА не выполняет
+> команды без явного подтверждения пользователя. `shell=True` без
+> подтверждения — это дыра, через которую модель может удалить файлы.
+
+```python
+COMMAND_TIMEOUT = 30  # секунд
+
+
+@tool("run_command", "выполняет команду в терминале (спрашивает подтверждение пользователя)")
+def run_command(command: str) -> str:
+    if not command:
+        return "Не указана команда"
+
+    # Обязательное подтверждение перед выполнением
+    confirm = input(
+        f"\n⚠️  Агент хочет выполнить команду:\n   {command}\n"
+        f"Разрешить? [y/n]: "
+    ).strip().lower()
+
+    if confirm != "y":
+        return "Команда отменена пользователем"
+
+    try:
+        result = subprocess.run(
+            command,
+            shell=True,
+            capture_output=True,
+            text=True,
+            timeout=COMMAND_TIMEOUT
+        )
+        parts = []
+        if result.stdout:
+            parts.append(result.stdout.strip()[:2000])
+        if result.stderr:
+            parts.append(f"[stderr] {result.stderr.strip()[:500]}")
+        parts.append(f"[код возврата: {result.returncode}]")
+        return "\n".join(parts)
+    except subprocess.TimeoutExpired:
+        return f"Команда выполнялась дольше {COMMAND_TIMEOUT} сек и была остановлена"
+    except Exception as e:
+        return f"Ошибка выполнения команды: {e}"
+```
+
+Защитные механизмы здесь:
+
+| Механизм | Зачем |
+|---|---|
+| `input()` с подтверждением | Человек — последнее звено перед выполнением |
+| `timeout=30` | Зависшая команда не заблокирует агента навсегда |
+| Обрезка вывода до 2000 символов | Огромный stdout не раздует контекст модели |
+| Возврат кода возврата | Модель поймёт, что команда упала, и сможет это учесть |
+
+### http_get — агент ходит в интернет
+
+```python
+@tool("http_get", "скачивает страницу по URL и возвращает её текст")
+def http_get(url: str, max_chars: int = 4000) -> str:
+    if not url.startswith(("http://", "https://")):
+        return "URL должен начинаться с http:// или https://"
+    try:
+        response = requests.get(
+            url,
+            timeout=15,
+            headers={"User-Agent": "firstAgent/1.0 (tutorial agent)"}
+        )
+        if response.status_code != 200:
+            return f"HTTP {response.status_code} для {url}"
+        text = response.text[:max_chars]
+        if len(response.text) > max_chars:
+            text += "\n... [обрезано] ..."
+        return text
+    except requests.exceptions.Timeout:
+        return f"Превышено время ожидания ответа от {url}"
+    except Exception as e:
+        return f"Ошибка HTTP-запроса: {e}"
+```
+
+Теперь агент может, например: «прочитай README по этой ссылке и перескажи».
+
+> ⚠️ Возвращается сырой HTML/текст страницы. Для продакшена стоит добавить
+> извлечение чистого текста (например, библиотекой `beautifulsoup4`).
+
+## 4.5 Добавляем инструмент за 5 строк
+
+Вот и весь процесс. Откройте `chapter4/src/tools.py` и допишите:
+
+```python
+@tool("current_time", "возвращает текущие дату и время")
+def current_time() -> str:
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+```
+
+Всё. Не нужно менять ни промпт, ни диспетчер, ни ядро агента:
+
+1. Декоратор положил функцию в `TOOL_REGISTRY` при импорте модуля.
+2. `render_tools_for_prompt()` сам добавил строку в системный промпт.
+3. `execute_tool()` сам найдёт функцию по имени.
+
+Проверить реестр можно запуском самого модуля:
+
+```bash
+python -m chapter4.src.tools
+```
+
+```text
+Зарегистрированные инструменты:
+  - calculator: безопасно считает арифметические выражения
+  - list_directory: показывает файлы и папки в директории
+  - read_file: читает текстовый файл
+  - search_in_file: ищет текст в файле
+  - write_file: записывает текст в файл (создаёт или перезаписывает)
+  - search_in_directory: ищет текст во всех файлах директории (рекурсивно)
+  - run_command: выполняет команду в терминале (спрашивает подтверждение пользователя)
+  - http_get: скачивает страницу по URL и возвращает её текст
+  - current_time: возвращает текущие дату и время
+
+Проверка calculator: 108
+Проверка current_time: 2026-08-16 12:00:00
+```
+
+## 4.6 Подключение плагинов к ядру агента
+
+Ядро агента взято из Главы 1 **без переписывания** — мы лишь подменяем
+три вещи на версии из реестра. Файл `chapter4/agent.py`:
+
+```python
+import requests
+
+from chapter1 import agent as base
+from chapter4.src import tools
+
+
+SYSTEM_PROMPT_TEMPLATE = """
+Ты — автономный агент-ассистент для разработчика.
+
+У тебя есть инструменты:
+{tools}
+
+Формат вызова инструмента:
+{{"name": "имя_инструмента", "arguments": {{...}}}}
+
+Пример:
+
+User: Посчитай 2+2
+Assistant: {{"name": "calculator", "arguments": {{"expression": "2+2"}}}}
+User: Observation from calculator: 4
+Assistant: 2 + 2 = 4
+
+Правила:
+1. Если нужен инструмент, ответь ТОЛЬКО JSON-вызовом или несколькими JSON-вызовами.
+2. Не добавляй пояснения до или после JSON при вызове инструмента.
+3. После получения Observation проанализируй результат.
+4. Если нужно вызвать ещё инструмент — снова верни JSON.
+5. Когда готов дать финальный ответ пользователю, ответь обычным текстом без JSON.
+6. Никогда не выдумывай результаты инструментов.
+""".strip()
+
+
+def install_plugins():
+    """Подключает реестр плагинов к ядру агента из Главы 1."""
+    base.KNOWN_TOOLS = tools.known_tools()
+    base.SYSTEM_PROMPT = SYSTEM_PROMPT_TEMPLATE.format(
+        tools=tools.render_tools_for_prompt()
+    )
+    base.execute_tool = tools.execute_tool
+```
+
+Что делает `install_plugins()`:
+
+| Было в Главе 1 | Стало в Главе 4 |
+|---|---|
+| `KNOWN_TOOLS` — множество, прописанное вручную | `tools.known_tools()` — из реестра |
+| `SYSTEM_PROMPT` — список инструментов вручную | Шаблон + `render_tools_for_prompt()` |
+| `execute_tool` — цепочка `if/elif` | Универсальный диспетчер реестра |
+
+> 💡 Обратите внимание на двойные фигурные скобки `{{...}}` в шаблоне:
+> это экранирование для `str.format()`, чтобы JSON-примеры остались
+> одинарными скобками в итоговом промпте.
+
+## 4.7 Запуск и тестирование
+
+```bash
+# Из корня проекта
+python -m chapter4.agent
+```
+
+```text
+============================================================
+🔌 Агент с системой плагинов (Глава 4)
+============================================================
+🔌 Загружено плагинов: 9
+   - calculator: безопасно считает арифметические выражения
+   - list_directory: показывает файлы и папки в директории
+   - read_file: читает текстовый файл
+   - search_in_file: ищет текст в файле
+   - write_file: записывает текст в файл (создаёт или перезаписывает)
+   - search_in_directory: ищет текст во всех файлах директории (рекурсивно)
+   - run_command: выполняет команду в терминале (спрашивает подтверждение пользователя)
+   - http_get: скачивает страницу по URL и возвращает её текст
+   - current_time: возвращает текущие дату и время
+```
+
+Примеры запросов, которые теперь работают:
+
+```text
+Вы > Найди все места, где используется KEEP_ALIVE
+🤖 Агент > search_in_directory → chapter1/agent.py:24: KEEP_ALIVE = "5m" ...
+
+Вы > Создай файл notes.txt с текстом "привет от агента"
+🤖 Агент > write_file → Записано 18 символов в .../notes.txt
+
+Вы > Который час?
+🤖 Агент > current_time → Сейчас 2026-08-16 12:00:00
+
+Вы > Выполни команду "python --version"
+⚠️  Агент хочет выполнить команду:
+   python --version
+Разрешить? [y/n]: y
+🤖 Агент > Python 3.13.x
+```
+
+## 4.8 Итоги главы: что даёт система плагинов
+
+| Критерий | Глава 1 (if/elif) | Глава 4 (реестр) |
+|---|---|---|
+| Новый инструмент | Правка в 3 местах | 5 строк с декоратором |
+| Промпт | Пишется вручную | Генерируется из реестра |
+| Диспетчер | Растёт с каждым инструментом | Один на все инструменты |
+| Ошибка «забыл добавить» | Легко допустить | Невозможна — декоратор делает всё сам |
+
+### Чек-лист безопасности новых плагинов
+
+- [ ] Опасные действия (команды, запись, удаление) — только с подтверждением
+- [ ] Таймауты на все внешние вызовы (`subprocess`, `requests`)
+- [ ] Обрезка длинного вывода, чтобы не раздувать контекст
+- [ ] Возврат ошибок строкой, а не исключением — модель должна их увидеть
+- [ ] Описание в `@tool` точно объясняет, когда использовать инструмент
 
 ---
 

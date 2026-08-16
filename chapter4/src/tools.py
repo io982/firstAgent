@@ -13,7 +13,10 @@
 import ast
 import operator
 import os
+import subprocess
 from datetime import datetime
+
+import requests
 
 
 # ====================================================================
@@ -159,6 +162,135 @@ def search_in_file(path: str, query: str, max_results: int = 20) -> str:
                     results.append(f"... [показаны первые {max_results}] ...")
                     break
     return "\n".join(results) if results else f"Ничего не найдено: {query}"
+
+
+# ====================================================================
+# НОВЫЕ ИНСТРУМЕНТЫ ГЛАВЫ 4
+# ====================================================================
+
+# --- Запись в файл ---
+
+@tool("write_file", "записывает текст в файл (создаёт или перезаписывает)")
+def write_file(path: str, content: str) -> str:
+    path = os.path.abspath(os.path.expanduser(path))
+    directory = os.path.dirname(path)
+    if not os.path.isdir(directory):
+        return f"Директория не найдена: {directory}"
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(content)
+    return f"Записано {len(content)} символов в {path}"
+
+
+# --- Поиск по всей директории (рекурсивно) ---
+
+SKIP_DIRS = {".git", "__pycache__", "node_modules", ".venv", "venv"}
+
+
+@tool("search_in_directory", "ищет текст во всех файлах директории (рекурсивно)")
+def search_in_directory(path: str = ".", query: str = "", max_results: int = 30) -> str:
+    path = os.path.abspath(os.path.expanduser(path))
+    if not os.path.isdir(path):
+        return f"Директория не найдена: {path}"
+    if not query:
+        return "Не указан текст для поиска"
+
+    results = []
+    query_lower = query.lower()
+
+    for root, dirs, files in os.walk(path):
+        # Пропускаем служебные директории
+        dirs[:] = [d for d in dirs if d not in SKIP_DIRS]
+
+        for name in sorted(files):
+            if len(results) >= max_results:
+                break
+            full_path = os.path.join(root, name)
+            try:
+                matches_in_file = 0
+                with open(full_path, "r", encoding="utf-8", errors="ignore") as f:
+                    for line_number, line in enumerate(f, start=1):
+                        if query_lower in line.lower():
+                            relative = os.path.relpath(full_path, path)
+                            results.append(f"{relative}:{line_number}: {line.rstrip()}")
+                            matches_in_file += 1
+                            # Не больше 3 совпадений на файл
+                            if matches_in_file >= 3:
+                                break
+            except OSError:
+                continue
+
+        if len(results) >= max_results:
+            break
+
+    if not results:
+        return f"Ничего не найдено: {query}"
+    if len(results) >= max_results:
+        results.append(f"... [показаны первые {max_results}] ...")
+    return "\n".join(results)
+
+
+# --- Выполнение команд с подтверждением пользователя ---
+
+COMMAND_TIMEOUT = 30  # секунд
+
+
+@tool("run_command", "выполняет команду в терминале (спрашивает подтверждение пользователя)")
+def run_command(command: str) -> str:
+    if not command:
+        return "Не указана команда"
+
+    # Обязательное подтверждение перед выполнением
+    confirm = input(
+        f"\n⚠️  Агент хочет выполнить команду:\n   {command}\n"
+        f"Разрешить? [y/n]: "
+    ).strip().lower()
+
+    if confirm != "y":
+        return "Команда отменена пользователем"
+
+    try:
+        result = subprocess.run(
+            command,
+            shell=True,
+            capture_output=True,
+            text=True,
+            timeout=COMMAND_TIMEOUT
+        )
+        parts = []
+        if result.stdout:
+            parts.append(result.stdout.strip()[:2000])
+        if result.stderr:
+            parts.append(f"[stderr] {result.stderr.strip()[:500]}")
+        parts.append(f"[код возврата: {result.returncode}]")
+        return "\n".join(parts)
+    except subprocess.TimeoutExpired:
+        return f"Команда выполнялась дольше {COMMAND_TIMEOUT} сек и была остановлена"
+    except Exception as e:
+        return f"Ошибка выполнения команды: {e}"
+
+
+# --- HTTP-запросы: агент ходит в интернет ---
+
+@tool("http_get", "скачивает страницу по URL и возвращает её текст")
+def http_get(url: str, max_chars: int = 4000) -> str:
+    if not url.startswith(("http://", "https://")):
+        return "URL должен начинаться с http:// или https://"
+    try:
+        response = requests.get(
+            url,
+            timeout=15,
+            headers={"User-Agent": "firstAgent/1.0 (tutorial agent)"}
+        )
+        if response.status_code != 200:
+            return f"HTTP {response.status_code} для {url}"
+        text = response.text[:max_chars]
+        if len(response.text) > max_chars:
+            text += "\n... [обрезано] ..."
+        return text
+    except requests.exceptions.Timeout:
+        return f"Превышено время ожидания ответа от {url}"
+    except Exception as e:
+        return f"Ошибка HTTP-запроса: {e}"
 
 
 # ====================================================================
