@@ -28,8 +28,11 @@
 - Python 3.10+
 - [Ollama](https://ollama.com)
 - Модель: `ollama pull qwen2.5-coder:3b`
+- **(GPU):** NVIDIA с 4+ GB видеопамяти (VRAM) для модели 3B, 8+ GB — для 7B
 
 > 💡 Код проверяется и работает на **Windows** (PowerShell, пути вида `E:\progects`), но не использует платформенно-специфичных функций — всё работает и на Linux, и на macOS.
+>
+> 💡 Без GPU всё тоже заработает — Ollama выполнит вычисления на CPU, но ответы будут заметно медленнее (в 5–10 раз).
 
 ## 🚀 Быстрый старт
 
@@ -39,7 +42,7 @@ git clone https://github.com/io982/firstAgent.git
 cd firstAgent
 
 # Установи зависимости
-pip install requests
+pip install -r requirements.txt
 
 # Запусти Главу 1 (из корня проекта)
 python -m chapter1.agent
@@ -54,25 +57,9 @@ python -m chapter3.agent
 python -m chapter4.agent
 
 # Запусти Главу 5 (долгосрочная память)
-pip install chromadb && ollama pull nomic-embed-text
+ollama pull nomic-embed-text
 python -m chapter5.agent
 ```
-
----
-
-## 🤖 Туториал: Создаём локального ИИ-агента с Ollama
-
-> **Цель туториала:** создать работающего локального агента с инструментами,
-> добавить к нему мульти-агентную архитектуру и разобраться в тонкостях
-> контекста, памяти и производительности.
-
-> **Требования:**
-> - **ОС:** Windows 10/11, Linux или macOS
-> - Установленная [Ollama](https://ollama.com)
-> - Python 3.10+
-> - Любая модель Qwen2.5 Coder или аналогичная с поддержкой tools
-
----
 
 ## 📑 Содержание
 
