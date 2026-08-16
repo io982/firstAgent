@@ -1,17 +1,22 @@
-# agentTutorial.md
+# Обновлённый `agentTutorial.md`
 
+Основные изменения:
+1. **Ссылки на главы** в таблице содержания теперь ведут на разделы внутри документа (якорные ссылки)
+2. **Глава 4 обновлена** под исправленный `tools.py`: добавлен `inspect.signature` для защиты от лишних аргументов, исправлен `write_file`
+
+```markdown
 # 🤖 Туториал: Создаём локального ИИ-агента с Ollama
 
-> Полный курс по созданию агентов с нуля до production-ready системы.
+Полный курс по созданию агентов с нуля до production-ready системы.
 
 ## 📚 Содержание
 
 | Глава | Тема | Код |
-|-------|------|-----|
-| [Глава 1](chapter1/) | Базовый агент с ReAct-паттерном | [`chapter1/agent.py`](chapter1/agent.py) |
-| [Глава 2](chapter2/) | Мульти-агентная система | [`chapter2/paraphraser.py`](chapter2/paraphraser.py) |
-| [Глава 3](chapter3/) | Контекст, память и производительность | [`chapter3/agent.py`](chapter3/agent.py) |
-| [Глава 4](chapter4/) | Система плагинов: расширяем инструменты | [`chapter4/src/tools.py`](chapter4/src/tools.py) |
+| --- | --- | --- |
+| [Глава 1](#глава-1-создание-простого-агента) | Базовый агент с ReAct-паттерном | [chapter1/agent.py](chapter1/agent.py) |
+| [Глава 2](#глава-2-добавление-распознавателя) | Мульти-агентная система | [chapter2/paraphraser.py](chapter2/paraphraser.py) |
+| [Глава 3](#глава-3-контекст-память-и-производительность) | Контекст, память и производительность | [chapter3/agent.py](chapter3/agent.py) |
+| [Глава 4](#глава-4-система-плагинов-добавляем-новые-инструменты) | Система плагинов: расширяем инструменты | [chapter4/src/tools.py](chapter4/src/tools.py) |
 
 ## 🎯 Что ты научишься делать
 
@@ -53,10 +58,10 @@ python -m chapter4.agent
 
 ---
 
-# 🤖 Туториал: Создаём локального ИИ-агента с Ollama
+## 🤖 Туториал: Создаём локального ИИ-агента с Ollama
 
-> **Цель туториала:** создать работающего локального агента с инструментами, 
-> добавить к нему мульти-агентную архитектуру и разобраться в тонкостях 
+> **Цель туториала:** создать работающего локального агента с инструментами,
+> добавить к нему мульти-агентную архитектуру и разобраться в тонкостях
 > контекста, памяти и производительности.
 
 > **Требования:**
@@ -68,11 +73,11 @@ python -m chapter4.agent
 
 ## 📑 Содержание
 
-1. [Глава 1. Создание простого агента](#глава-1-создание-простого-агента)
-2. [Глава 2. Добавление распознавателя (перефразировщика)](#глава-2-добавление-распознавателя)
-3. [Глава 3. Контекст, память и производительность](#глава-3-контекст-память-и-производительность)
-4. [Глава 4. Система плагинов: добавляем новые инструменты](#глава-4-система-плагинов-добавляем-новые-инструменты)
-5. [Приложение. Шпаргалки и частые ошибки](#приложение)
+- [Глава 1. Создание простого агента](#глава-1-создание-простого-агента)
+- [Глава 2. Добавление распознавателя (перефразировщика)](#глава-2-добавление-распознавателя)
+- [Глава 3. Контекст, память и производительность](#глава-3-контекст-память-и-производительность)
+- [Глава 4. Система плагинов: добавляем новые инструменты](#глава-4-система-плагинов-добавляем-новые-инструменты)
+- [Приложение. Шпаргалки и частые ошибки](#приложение)
 
 ---
 
@@ -80,7 +85,7 @@ python -m chapter4.agent
 
 ## 1.1 Что такое агент и чем он отличается от чат-бота
 
-**Чат-бот** — это модель, которая получает текст и возвращает текст. 
+**Чат-бот** — это модель, которая получает текст и возвращает текст.
 Она не может взаимодействовать с внешним миром.
 
 **Агент** — это модель + инструменты + цикл принятия решений.
@@ -127,8 +132,8 @@ Capabilities
     completion
 ```
 
-> ⚠️ **Важно:** наличие `tools` в Capabilities не гарантирует, что модель 
-> будет использовать нативный формат tool_calls. Некоторые кастомные модели 
+> ⚠️ **Важно:** наличие `tools` в Capabilities не гарантирует, что модель
+> будет использовать нативный формат tool_calls. Некоторые кастомные модели
 > возвращают вызовы инструментов в текстовом формате. Об этом — в разделе 1.5.
 
 ## 1.3 Первый запрос к Ollama
@@ -163,7 +168,7 @@ python test.py
 
 ## 1.4 Архитектура ReAct-агента
 
-ReAct (Reasoning + Acting) — паттерн, в котором модель чередует рассуждения 
+ReAct (Reasoning + Acting) — паттерн, в котором модель чередует рассуждения
 и действия:
 
 ```text
@@ -187,7 +192,7 @@ Ollama поддерживает два формата работы с инстр
 
 ### Нативный формат (tool_calls)
 
-Вы отправляете `"tools": [...]` в запросе, а модель возвращает 
+Вы отправляете `"tools": [...]` в запросе, а модель возвращает
 структурированное поле `tool_calls`:
 
 ```python
@@ -217,11 +222,11 @@ if message.get("tool_calls"):
 В этом случае поле `tool_calls` пустое, и нужно парсить текст.
 
 > 🔍 **Как понять, какой формат использует ваша модель?**
-> Сделайте тестовый запрос с tools и посмотрите на ответ. Если `tool_calls` 
-> пустое, но в `content` есть JSON с инструментами — модель использует 
+> Сделайте тестовый запрос с tools и посмотрите на ответ. Если `tool_calls`
+> пустое, но в `content` есть JSON с инструментами — модель использует
 > текстовый формат.
 
-**В этом туториале мы используем текстовый формат**, так как он работает 
+**В этом туториале мы используем текстовый формат**, так как он работает
 с любыми моделями, включая кастомные.
 
 ## 1.6 Полный код агента
@@ -315,13 +320,13 @@ def is_ollama_running() -> bool:
 def start_ollama_server():
     """Запускает ollama serve как фоновый процесс."""
     print("🚀 Запускаю сервер Ollama...")
-    
+
     kwargs = {}
     if sys.platform == "win32":
         kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
         kwargs["stdout"] = subprocess.DEVNULL
         kwargs["stderr"] = subprocess.DEVNULL
-    
+
     try:
         process = subprocess.Popen(["ollama", "serve"], **kwargs)
         print(f"✅ Сервер Ollama запущен (PID: {process.pid})")
@@ -338,13 +343,13 @@ def wait_for_ollama(timeout: int = 30) -> bool:
     """Ждёт, пока сервер Ollama начнёт отвечать."""
     print(f"⏳ Ожидание запуска сервера (до {timeout} сек)...")
     start_time = time.time()
-    
+
     while time.time() - start_time < timeout:
         if is_ollama_running():
             print("✅ Сервер Ollama готов!")
             return True
         time.sleep(1)
-    
+
     print("❌ Сервер не запустился за отведённое время.")
     return False
 
@@ -354,10 +359,10 @@ def ensure_ollama_running() -> bool:
     if is_ollama_running():
         print("✅ Сервер Ollama уже работает.")
         return True
-    
+
     if not start_ollama_server():
         return False
-    
+
     return wait_for_ollama()
 
 
@@ -367,7 +372,7 @@ def model_exists(model_name: str) -> bool:
         response = requests.get(f"{OLLAMA_BASE}/api/tags", timeout=5)
         if response.status_code != 200:
             return False
-        
+
         models = response.json().get("models", [])
         for model in models:
             name = model.get("name", "")
@@ -425,10 +430,12 @@ ALLOWED_UNARY_OPS = {
 def _safe_eval_node(node):
     if isinstance(node, ast.Expression):
         return _safe_eval_node(node.body)
+
     if isinstance(node, ast.Constant):
         if isinstance(node.value, (int, float)):
             return node.value
         raise ValueError("Разрешены только числа")
+
     if isinstance(node, ast.BinOp):
         op_type = type(node.op)
         if op_type not in ALLOWED_BIN_OPS:
@@ -437,11 +444,13 @@ def _safe_eval_node(node):
             _safe_eval_node(node.left),
             _safe_eval_node(node.right)
         )
+
     if isinstance(node, ast.UnaryOp):
         op_type = type(node.op)
         if op_type not in ALLOWED_UNARY_OPS:
             raise ValueError("Недопустимый унарный оператор")
         return ALLOWED_UNARY_OPS[op_type](_safe_eval_node(node.operand))
+
     raise ValueError("Недопустимое выражение")
 
 
@@ -553,7 +562,7 @@ def normalize_potential_tool(obj):
 
 def extract_tool_calls(text: str):
     calls = []
-    
+
     # Поиск в markdown code blocks
     for block in re.findall(r"```(?:json)?\s*(.*?)\s*```", text, re.DOTALL):
         try:
@@ -563,10 +572,10 @@ def extract_tool_calls(text: str):
                 calls.append(tc)
         except Exception:
             pass
-    
+
     if calls:
         return calls
-    
+
     # Поиск JSON в тексте
     decoder = json.JSONDecoder()
     pos = 0
@@ -582,7 +591,7 @@ def extract_tool_calls(text: str):
             pos = end
         except json.JSONDecodeError:
             pos = start + 1
-    
+
     return calls
 
 
@@ -726,7 +735,7 @@ python agent.py
 
 ## 1.8 Безопасность инструментов
 
-> 🔒 **Важное правило:** никогда не давайте агенту неконтролируемый доступ 
+> 🔒 **Важное правило:** никогда не давайте агенту неконтролируемый доступ
 > к выполнению команд (`shell=True`, `eval()`, `exec()`).
 
 Наш калькулятор использует **безопасный парсер AST**, а не `eval()`:
@@ -740,7 +749,7 @@ tree = ast.parse(expression, mode="eval")
 result = _safe_eval_node(tree)  # разрешены только числа и базовые операторы
 ```
 
-Если хотите добавить инструмент выполнения команд — делайте его 
+Если хотите добавить инструмент выполнения команд — делайте его
 с подтверждением пользователя:
 
 ```python
@@ -803,7 +812,7 @@ agent.VERBOSE = VERBOSE  # передаём режим первому агент
 PARAPHRASE_PROMPT = """
 Ты — перефразировщик запросов для ИИ-агента.
 
-Твоя задача — перефразировать запрос пользователя, сделав его максимально 
+Твоя задача — перефразировать запрос пользователя, сделав его максимально
 чётким, конкретным и пригодным для автоматического выполнения.
 
 Правила:
@@ -838,6 +847,7 @@ def paraphrase(text: str) -> str:
 
     # Очистка от возможных артефактов
     result = result.strip('"').strip("'").strip()
+
     for prefix in ["перефразированный запрос:", "перефразировано:", "ответ:"]:
         if result.lower().startswith(prefix):
             result = result[len(prefix):].strip()
@@ -925,15 +935,15 @@ def parallel_agents(task):
     with concurrent.futures.ThreadPoolExecutor() as executor:
         future1 = executor.submit(agent1.run, task)
         future2 = executor.submit(agent2.run, task)
-        
+
         result1 = future1.result()
         result2 = future2.result()
-    
+
     return merge(result1, result2)
 ```
 
-> ⚠️ При параллельных запросах к одной модели Ollama ставит их в очередь 
-> (по умолчанию `OLLAMA_NUM_PARALLEL=1`). Для реальной параллельности 
+> ⚠️ При параллельных запросах к одной модели Ollama ставит их в очередь
+> (по умолчанию `OLLAMA_NUM_PARALLEL=1`). Для реальной параллельности
 > нужно поднять этот параметр (см. Главу 3).
 
 ## 2.5 Добавление агента-критика (опционально)
@@ -972,12 +982,12 @@ def critic(question: str, answer: str) -> str:
 [Системный промпт] + [История сообщений] + [Текущий запрос] + [Ответ модели]
 ```
 
-Измеряется в **токенах** (примерно 1 токен = 0.75 слова в английском, 
+Измеряется в **токенах** (примерно 1 токен = 0.75 слова в английском,
 или 1-2 символа в русском).
 
 ### Что происходит с памятью
 
-Ollama резервирует память под **KV-cache** для всего контекстного окна, 
+Ollama резервирует память под **KV-cache** для всего контекстного окна,
 даже если фактически используется малая часть:
 
 ```text
@@ -1051,26 +1061,26 @@ conversation_history = []
 
 def ask_agent_with_memory(user_task: str) -> str:
     global conversation_history
-    
+
     # Добавляем запрос
     conversation_history.append({"role": "user", "content": user_task})
-    
+
     # Формируем сообщения: system + история
     messages = [{"role": "system", "content": SYSTEM_PROMPT}]
     messages.extend(conversation_history)
-    
+
     # ... (рабочий цикл с tools) ...
-    
+
     final_answer = "..."  # результат работы агента
-    
+
     # Сохраняем ответ в историю
     conversation_history.append({"role": "assistant", "content": final_answer})
-    
+
     # Обрезаем историю, чтобы не раздувать контекст
     MAX_HISTORY = 10
     if len(conversation_history) > MAX_HISTORY:
         conversation_history = conversation_history[-MAX_HISTORY:]
-    
+
     return final_answer
 ```
 
@@ -1203,10 +1213,10 @@ def execute_tool(name, args):
     # ... каждый новый инструмент = правка в трёх местах
 ```
 
-Чтобы добавить один инструмент, нужно изменить **три разных места** и нигде
+Чтобы добавить один инструмент, нужно изменить три разных места и нигде
 не ошибиться. Это не масштабируется.
 
-**Цель Главы 4:** добавление нового инструмента должно занимать **5 строк кода**,
+**Цель Главы 4:** добавление нового инструмента должно занимать 5 строк кода,
 и ничего больше менять не нужно.
 
 ## 4.2 Решение: реестр инструментов через декораторы
@@ -1216,9 +1226,10 @@ def execute_tool(name, args):
 функцию в реестр в момент определения.
 
 ```python
+import inspect
+
 # name -> {"func": callable, "description": str}
 TOOL_REGISTRY = {}
-
 
 def tool(name: str, description: str):
     """Декоратор: регистрирует функцию как инструмент агента."""
@@ -1237,14 +1248,16 @@ def known_tools() -> set:
 
 
 def execute_tool(name: str, args: dict) -> str:
-    """Вызывает инструмент по имени, передавая аргументы в функцию."""
+    """Вызывает инструмент по имени, фильтруя лишние аргументы."""
     entry = TOOL_REGISTRY.get(name)
     if entry is None:
         return f"Неизвестный инструмент: {name}"
     try:
-        return str(entry["func"](**args))
-    except TypeError as e:
-        return f"Неверные аргументы для инструмента {name}: {e}"
+        func = entry["func"]
+        sig = inspect.signature(func)
+        # Берём только те аргументы, которые функция реально принимает
+        valid_args = {k: v for k, v in args.items() if k in sig.parameters}
+        return str(func(**valid_args))
     except Exception as e:
         return f"Ошибка инструмента {name}: {e}"
 
@@ -1259,7 +1272,29 @@ def render_tools_for_prompt() -> str:
 
 Обратите внимание: `execute_tool` больше не содержит `if/elif` по именам —
 он один и тот же для любого количества плагинов. А `render_tools_for_prompt`
-генерирует описание инструментов для промпта **автоматически** из реестра.
+генерирует описание инструментов для промпта автоматически из реестра.
+
+### Защита от лишних аргументов через `inspect.signature`
+
+LLM иногда «галлюцинирует» и передаёт инструментам аргументы, которых нет
+в сигнатуре функции. Например:
+
+```json
+{"name": "calculator", "arguments": {"expression": "2+2", "reason": "нужно посчитать"}}
+```
+
+Если просто сделать `func(**args)`, Python упадёт с `TypeError: unexpected keyword argument 'reason'`.
+
+Чтобы этого избежать, мы используем `inspect.signature` и передаём функции
+**только те аргументы, которые она реально принимает**:
+
+```python
+sig = inspect.signature(func)
+valid_args = {k: v for k, v in args.items() if k in sig.parameters}
+return str(func(**valid_args))
+```
+
+Лишние аргументы просто отбрасываются, и агент продолжает работать.
 
 ## 4.3 Как модель сама выбирает нужный инструмент
 
@@ -1280,7 +1315,7 @@ TOOL_REGISTRY
 Реестр находит функцию по имени и передаёт аргументы через **args
 ```
 
-Ключевое правило: **описание в декораторе — это то, что видит модель**.
+Ключевое правило: **описание в декораторе — это то, что видит модель.**
 Чем точнее описание, тем правильнее модель выбирает инструмент. Сравните:
 
 ```python
@@ -1302,12 +1337,15 @@ TOOL_REGISTRY
 def write_file(path: str, content: str) -> str:
     path = os.path.abspath(os.path.expanduser(path))
     directory = os.path.dirname(path)
-    if not os.path.isdir(directory):
+    if directory and not os.path.isdir(directory):
         return f"Директория не найдена: {directory}"
     with open(path, "w", encoding="utf-8") as f:
         f.write(content)
     return f"Записано {len(content)} символов в {path}"
 ```
+
+> 💡 Проверка `if directory and ...` нужна для случая, когда файл создаётся
+> в текущей директории и `os.path.dirname` возвращает пустую строку.
 
 ### search_in_directory — поиск по всей директории
 
@@ -1316,7 +1354,6 @@ def write_file(path: str, content: str) -> str:
 
 ```python
 SKIP_DIRS = {".git", "__pycache__", "node_modules", ".venv", "venv"}
-
 
 @tool("search_in_directory", "ищет текст во всех файлах директории (рекурсивно)")
 def search_in_directory(path: str = ".", query: str = "", max_results: int = 30) -> str:
@@ -1369,7 +1406,6 @@ def search_in_directory(path: str = ".", query: str = "", max_results: int = 30)
 
 ```python
 COMMAND_TIMEOUT = 30  # секунд
-
 
 @tool("run_command", "выполняет команду в терминале (спрашивает подтверждение пользователя)")
 def run_command(command: str) -> str:
@@ -1485,7 +1521,7 @@ python -m chapter4.src.tools
 
 ## 4.6 Подключение плагинов к ядру агента
 
-Ядро агента взято из Главы 1 **без переписывания** — мы лишь подменяем
+Ядро агента взято из Главы 1 без переписывания — мы лишь подменяем
 три вещи на версии из реестра. Файл `chapter4/agent.py`:
 
 ```python
@@ -1505,7 +1541,6 @@ SYSTEM_PROMPT_TEMPLATE = """
 {{"name": "имя_инструмента", "arguments": {{...}}}}
 
 Пример:
-
 User: Посчитай 2+2
 Assistant: {{"name": "calculator", "arguments": {{"expression": "2+2"}}}}
 User: Observation from calculator: 4
@@ -1592,6 +1627,7 @@ python -m chapter4.agent
 | Промпт | Пишется вручную | Генерируется из реестра |
 | Диспетчер | Растёт с каждым инструментом | Один на все инструменты |
 | Ошибка «забыл добавить» | Легко допустить | Невозможна — декоратор делает всё сам |
+| Лишние аргументы от модели | `TypeError` и падение | Фильтруются через `inspect.signature` |
 
 ### Чек-лист безопасности новых плагинов
 
@@ -1636,6 +1672,7 @@ ollama ps
 | Медленный первый ответ | Модель загружается в память | `preload_model()` + `keep_alive` |
 | Out of memory | Большой `num_ctx` + параллельные запросы | Уменьшить `num_ctx`, поднять `OLLAMA_NUM_PARALLEL` осторожно |
 | Агент зацикливается | Модель не может завершить задачу | Уменьшить `MAX_ITERATIONS`, улучшить промпт |
+| `TypeError: unexpected keyword` | Модель передала лишний аргумент | `inspect.signature` в `execute_tool` (Глава 4.2) |
 
 ## Рекомендуемые модели для агентов
 
@@ -1656,5 +1693,6 @@ ollama ps
 ---
 
 > **Дата создания туториала:** 16 августа 2026
-> **Версия:** 1.1
+> **Версия:** 1.2
 > **Автор:** Создано на основе практической сессии с Ollama + Qwen2.5 Coder
+```
