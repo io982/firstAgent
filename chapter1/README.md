@@ -11,5 +11,5 @@
 ## Запуск
 
 ```bash
-cd chapter1
-python agent.py
+# Из корня проекта
+python -m chapter1.agent

@@ -38,9 +38,14 @@ cd firstAgent
 # Установи зависимости
 pip install requests
 
-# Запусти Главу 1
-cd chapter1
-python agent.py
+# Запусти Главу 1 (из корня проекта)
+python -m chapter1.agent
+
+# Запусти Главу 2 (мульти-агент)
+python -m chapter2.paraphraser
+
+# Запусти Главу 3
+python -m chapter3.agent
 
 ```markdown
 # 🤖 Туториал: Создаём локального ИИ-агента с Ollama
