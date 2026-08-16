@@ -1,5 +1,47 @@
 # agentTutorial.md
 
+# 🤖 Туториал: Создаём локального ИИ-агента с Ollama
+
+> Полный курс по созданию агентов с нуля до production-ready системы.
+
+## 📚 Содержание
+
+| Глава | Тема | Код |
+|-------|------|-----|
+| [Глава 1](chapter1/) | Базовый агент с ReAct-паттерном | [`chapter1/agent.py`](chapter1/agent.py) |
+| [Глава 2](chapter2/) | Мульти-агентная система | [`chapter2/paraphraser.py`](chapter2/paraphraser.py) |
+| [Глава 3](chapter3/) | Контекст, память и производительность | [`chapter3/agent.py`](chapter3/agent.py) |
+| [Глава 4](chapter4/) | Система плагинов: расширяем инструменты | [`chapter4/src/tools.py`](chapter4/src/tools.py) |
+
+## 🎯 Что ты научишься делать
+
+- ✅ Создавать агентов с ReAct-паттерном
+- ✅ Работать с инструментами (tools/function calling)
+- ✅ Строить мульти-агентные системы
+- ✅ Оптимизировать память и производительность
+- ✅ Создавать расширяемую систему плагинов
+- ✅ Добавлять новые инструменты за 5 строк кода
+
+## 🛠️ Требования
+
+- Python 3.10+
+- [Ollama](https://ollama.com)
+- Модель: `ollama pull qwen2.5-coder:3b`
+
+## 🚀 Быстрый старт
+
+```bash
+# Клонируй репозиторий
+git clone https://github.com/io982/firstAgent.git
+cd firstAgent
+
+# Установи зависимости
+pip install requests
+
+# Запусти Главу 1
+cd chapter1
+python agent.py
+
 ```markdown
 # 🤖 Туториал: Создаём локального ИИ-агента с Ollama
 
