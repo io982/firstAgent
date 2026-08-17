@@ -81,7 +81,16 @@ def execute_tool(name: str, args: dict) -> str:
     try:
         func = entry["func"]
         sig = inspect.signature(func)
-        valid_args = {k: v for k, v in args.items() if k in sig.parameters}
+        # Функция с **kwargs принимает любые аргументы — отбрасывать нечего.
+        # Это позволяет инструменту самому разобрать то, что выдумала модель.
+        accepts_any = any(
+            p.kind is inspect.Parameter.VAR_KEYWORD
+            for p in sig.parameters.values()
+        )
+        if accepts_any:
+            valid_args = args
+        else:
+            valid_args = {k: v for k, v in args.items() if k in sig.parameters}
         return str(func(**valid_args))
     except Exception as e:
         return f"Ошибка инструмента {name}: {e}"
