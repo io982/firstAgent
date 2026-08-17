@@ -114,7 +114,7 @@ def main():
 
     print(f"\n🔍 Проверяю модель '{agent.MODEL}'...")
     if not agent.model_exists(agent.MODEL):
-        print(f"❌ Модель '{agent.MODEL}' не найдена.")
+        print(agent.model_not_found_message(agent.MODEL))
         return
     print("✅ Модель готова.")
 

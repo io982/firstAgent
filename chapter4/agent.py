@@ -66,7 +66,7 @@ def main():
 
     print(f"\n🔍 Проверяю модель '{base.MODEL}'...")
     if not base.model_exists(base.MODEL):
-        print(f"❌ Модель '{base.MODEL}' не найдена.")
+        print(base.model_not_found_message(base.MODEL))
         return
     print("✅ Модель готова.")
 
@@ -122,6 +122,7 @@ if __name__ == "__main__":
 
 ensure_ollama_running = base.ensure_ollama_running
 model_exists = base.model_exists
+model_not_found_message = base.model_not_found_message
 preload_model = base.preload_model
 ask_agent = base.ask_agent
 

@@ -1,8 +1,8 @@
 """Агент с долгосрочной памятью (RAG)."""
-from chapter1 import agent as base
-base.VERBOSE = True  # ← добавь эту строку
+
 import requests
 
+from chapter1 import agent as base
 from chapter4 import agent as chapter4_agent
 from chapter5.src import tools  # импортируем плагины, они сами зарегистрируются
 
@@ -41,7 +41,7 @@ def main():
         return
 
     if not chapter4_agent.model_exists(chapter4_agent.MODEL):
-        print(f"❌ Модель '{chapter4_agent.MODEL}' не найдена.")
+        print(chapter4_agent.model_not_found_message(chapter4_agent.MODEL))
         return
 
     chapter4_agent.preload_model(chapter4_agent.MODEL)
@@ -73,7 +73,7 @@ def main():
                 print("👋 Пока!")
                 break
 
-            if not chapter4_agent.VERBOSE:
+            if not base.VERBOSE:
                 print("⏳ Думаю...")
 
             answer = chapter4_agent.ask_agent(user_input)

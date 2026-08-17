@@ -11,7 +11,11 @@ import requests
 
 OLLAMA_URL = "http://localhost:11434/api/chat"
 OLLAMA_BASE = "http://localhost:11434"
-MODEL = "qwen2_5coder3b_q5:latest"
+# Модель по умолчанию — кастомная Q5-сборка qwen2.5-coder:3b.
+# Другая модель подключается через переменную окружения, править код не нужно:
+#   Windows (PowerShell): $env:AGENT_MODEL = "qwen2.5-coder:3b"
+#   Linux / macOS:        export AGENT_MODEL=qwen2.5-coder:3b
+MODEL = os.getenv("AGENT_MODEL", "qwen2_5coder3b_q5:latest")
 # Флаг режима вывода
 # True  = подробный режим (видно все итерации, вызовы инструментов)
 # False = чистый режим (только финальный ответ)
@@ -135,25 +139,48 @@ def ensure_ollama_running() -> bool:
     return wait_for_ollama()
 
 
-def model_exists(model_name: str) -> bool:
-    """Проверяет, установлена ли модель в Ollama."""
+def list_installed_models() -> list:
+    """Возвращает имена моделей, установленных в Ollama."""
     try:
         response = requests.get(f"{OLLAMA_BASE}/api/tags", timeout=5)
         if response.status_code != 200:
-            return False
-        
-        data = response.json()
-        models = data.get("models", [])
-        
-        for model in models:
-            name = model.get("name", "")
-            # Ищем совпадение с ":latest" и без
-            if name == model_name or name.startswith(f"{model_name.split(':')[0]}:"):
-                return True
-        
-        return False
+            return []
+        return [m.get("name", "") for m in response.json().get("models", [])]
     except Exception:
-        return False
+        return []
+
+
+def model_exists(model_name: str) -> bool:
+    """Проверяет, установлена ли модель в Ollama.
+
+    Имя без тега ("qwen2.5-coder") подходит к любому тегу.
+    Имя с тегом ("qwen2.5-coder:3b") требует именно этот тег,
+    чтобы установленная 7b не выдавала себя за запрошенную 3b.
+    """
+    installed = list_installed_models()
+
+    for name in installed:
+        if name == model_name:
+            return True
+        # Ollama показывает "модель:latest", запрашивать можно без тега
+        if ":" not in model_name and name == f"{model_name}:latest":
+            return True
+        if ":" not in model_name and name.startswith(f"{model_name}:"):
+            return True
+
+    return False
+
+
+def model_not_found_message(model_name: str) -> str:
+    """Подсказка, что делать, если модель не найдена."""
+    installed = list_installed_models()
+    lines = [f"❌ Модель '{model_name}' не найдена."]
+    if installed:
+        lines.append("   Установлены: " + ", ".join(installed))
+        lines.append("   Выбрать другую: задайте переменную окружения AGENT_MODEL")
+        lines.append('   PowerShell: $env:AGENT_MODEL = "имя_модели"')
+    lines.append(f"   Установить эту: ollama pull {model_name}")
+    return "\n".join(lines)
 
 
 def preload_model(model_name: str):
@@ -469,7 +496,7 @@ def main():
     
     print(f"\n🔍 Проверяю модель '{MODEL}'...")
     if not model_exists(MODEL):
-        print(f"❌ Модель '{MODEL}' не найдена.")
+        print(model_not_found_message(MODEL))
         return
     print(f"✅ Модель готова.")
     
