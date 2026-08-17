@@ -3,6 +3,36 @@
 from chapter4.src import tools as chapter4_tools
 from .indexer import index_project, search_project, project_stats
 
+# Бюджет выдачи ask_project. Всё, что вернёт инструмент, попадает
+# в контекст модели, а он не резиновый — см. NUM_CTX в главе 6.
+MAX_FRAGMENT_CHARS = 600
+MAX_TOTAL_CHARS = 3000
+
+
+def _trim_to_whole_lines(text: str, limit: int) -> str:
+    """Обрезает текст по границе строк, а не посреди неё.
+
+    Каждая строка фрагмента начинается с номера ("27: def calculator").
+    Обрывок без номера модель воспринимает как отдельную строку кода
+    и потом ссылается на несуществующие места.
+    """
+    if len(text) <= limit:
+        return text
+
+    kept = []
+    used = 0
+    for line in text.split("\n"):
+        if used + len(line) + 1 > limit:
+            break
+        kept.append(line)
+        used += len(line) + 1
+
+    if not kept:
+        return text[:limit]
+
+    kept.append("... [фрагмент обрезан] ...")
+    return "\n".join(kept)
+
 
 @chapter4_tools.tool(
     "index_project",
@@ -36,8 +66,14 @@ def ask_project(query: str, max_results: int = 5) -> str:
                 "Возможно, проект ещё не проиндексирован — используй index_project.")
 
     output = []
+    total = 0
     for i, r in enumerate(results, 1):
-        output.append(f"{i}. [{r['path']}]\n{r['text'][:800]}")
+        fragment = f"{i}. [{r['path']}]\n{_trim_to_whole_lines(r['text'], MAX_FRAGMENT_CHARS)}"
+        if total + len(fragment) > MAX_TOTAL_CHARS:
+            output.append(f"... [показаны {i - 1} из {len(results)} найденных фрагментов] ...")
+            break
+        output.append(fragment)
+        total += len(fragment)
 
     return "\n\n".join(output)
 

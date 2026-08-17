@@ -23,6 +23,11 @@ VERBOSE = False
 
 MAX_ITERATIONS = 8
 
+# Размер контекстного окна модели.
+# Главам с большими Observation (RAG) его не хватает — они поднимают
+# значение сами: base.NUM_CTX = 8192.
+NUM_CTX = 4096
+
 # Сколько держать модель в памяти после последнего запроса
 # "5m" = 5 минут, "0" = выгружать сразу, "-1" = никогда не выгружать
 KEEP_ALIVE = "5m"
@@ -428,7 +433,7 @@ def request_model(messages: list) -> dict:
         "keep_alive": KEEP_ALIVE,  # удерживаем модель в памяти!
         "options": {
             "temperature": 0.1,
-            "num_ctx": 4096    # ← было 65536, стало 4096
+            "num_ctx": NUM_CTX    # ← было 65536, стало 4096
         }
     }
     response = requests.post(OLLAMA_URL, json=payload, timeout=300)

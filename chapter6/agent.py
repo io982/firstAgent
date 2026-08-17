@@ -58,6 +58,12 @@ def main():
     # Добавляем правила работы с проектом к промпту
     base.SYSTEM_PROMPT = base.SYSTEM_PROMPT + "\n" + PROJECT_RULES
 
+    # Контекст из Главы 1 (4096) здесь мал. Замеры на qwen2.5-coder 3B:
+    # системный промпт с PROJECT_RULES — 1511 токенов, одна выдача
+    # ask_project — ещё 1322. Второй вызов инструмента выходит за 4096,
+    # и Ollama молча срезает начало диалога вместе с системным промптом.
+    base.NUM_CTX = 8192
+
     # Показываем статистику индекса
     try:
         from chapter6.src.indexer import project_stats
