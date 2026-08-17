@@ -5,6 +5,7 @@ import requests
 from chapter1 import agent as base
 from chapter4 import agent as chapter4_agent
 from chapter5.src import tools  # импортируем плагины, они сами зарегистрируются
+from chapter5.src import vectorstore
 
 # Дополнительные правила для работы с долгосрочной памятью
 MEMORY_RULES = r"""
@@ -54,14 +55,12 @@ def main():
 
     # Показываем, сколько документов уже в базе
     try:
-        from chapter5.src.vectorstore import get_or_create_collection
-        collection = get_or_create_collection()
-        doc_count = collection.count()
-        print(f"\n🧠 Модель: {chapter4_agent.MODEL}")
-        print(f"💾 Векторная база: ./chroma_db ({doc_count} документов)")
-    except Exception:
-        print(f"\n🧠 Модель: {chapter4_agent.MODEL}")
-        print(f"💾 Векторная база: ./chroma_db")
+        storage = f"{vectorstore.CHROMA_PERSIST_DIR} ({vectorstore.get_or_create_collection().count()} документов)"
+    except Exception as e:
+        storage = f"{vectorstore.CHROMA_PERSIST_DIR} (не удалось открыть: {e})"
+
+    print(f"\n🧠 Модель: {chapter4_agent.MODEL}")
+    print(f"💾 Векторная база: {storage}")
     print("🛑 exit / quit / выход — для выхода.\n")
 
     while True:

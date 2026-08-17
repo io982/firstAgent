@@ -1,21 +1,33 @@
 """Векторная база знаний на ChromaDB."""
 
-import chromadb
-from chromadb.config import Settings
+import os
 
+import chromadb
+
+from chapter1 import agent as base
 from .embeddings import get_embedding, get_embeddings
 
-# Локальная база в папке проекта
-CHROMA_PERSIST_DIR = "./chroma_db"
+# Локальная база в корне проекта.
+# Путь абсолютный: с относительным "./chroma_db" запуск из другой
+# директории создавал бы вторую, пустую базу.
+CHROMA_PERSIST_DIR = os.path.join(base.PROJECT_ROOT, "chroma_db")
 COLLECTION_NAME = "agent_memory"
 
-# Новый API ChromaDB (версия 0.4+)
-client = chromadb.PersistentClient(path=CHROMA_PERSIST_DIR)
+_client = None
+
+
+def _get_client():
+    """Клиент создаётся при первом обращении, а не при импорте модуля."""
+    global _client
+    if _client is None:
+        # Новый API ChromaDB (версия 0.4+)
+        _client = chromadb.PersistentClient(path=CHROMA_PERSIST_DIR)
+    return _client
 
 
 def get_or_create_collection():
     """Получает или создаёт коллекцию для хранения документов."""
-    return client.get_or_create_collection(
+    return _get_client().get_or_create_collection(
         name=COLLECTION_NAME,
         metadata={"hnsw:space": "cosine"}  # косинусное сходство
     )

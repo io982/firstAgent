@@ -4,10 +4,13 @@ import os
 
 import chromadb
 
+from chapter1 import agent as base
 # Используем НОВЫЕ функции с префиксами для nomic-embed-text
 from chapter5.src.embeddings import get_document_embedding, get_query_embedding
 
-CHROMA_PERSIST_DIR = "./chroma_db"
+# Та же база, что у памяти Главы 5, но своя коллекция.
+# Путь абсолютный — иначе запуск не из корня создаст вторую базу.
+CHROMA_PERSIST_DIR = os.path.join(base.PROJECT_ROOT, "chroma_db")
 PROJECT_COLLECTION = "project_files"
 
 INDEX_EXTENSIONS = {

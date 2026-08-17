@@ -11,6 +11,11 @@ import requests
 
 OLLAMA_URL = "http://localhost:11434/api/chat"
 OLLAMA_BASE = "http://localhost:11434"
+
+# Корень проекта — на уровень выше папки chapter1.
+# Нужен, чтобы данные (например, векторная база) всегда лежали в одном
+# месте и не зависели от того, из какой директории запущен агент.
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # Модель по умолчанию — кастомная Q5-сборка qwen2.5-coder:3b.
 # Другая модель подключается через переменную окружения, править код не нужно:
 #   Windows (PowerShell): $env:AGENT_MODEL = "qwen2.5-coder:3b"
