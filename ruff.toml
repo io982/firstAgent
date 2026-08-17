@@ -1,0 +1,26 @@
+# Конфигурация линтера ruff.
+#
+# Локальный запуск:
+#   pip install ruff
+#   ruff check .
+#   ruff check . --fix     # починить то, что чинится автоматически
+
+target-version = "py310"
+line-length = 100
+
+exclude = [".venv", "venv", "__pycache__", "chroma_db"]
+
+[lint]
+# E,W — стиль (pycodestyle), F — реальные ошибки (pyflakes),
+# I — порядок импортов, UP — устаревшие конструкции Python.
+select = ["E", "W", "F", "I", "UP"]
+
+ignore = [
+    # Длина строки. В коде много системных промптов и описаний инструментов —
+    # это связный текст на русском, и перенос по 100 символов делает его
+    # менее читаемым, а не более.
+    "E501",
+]
+
+[lint.isort]
+known-first-party = ["chapter1", "chapter2", "chapter3", "chapter4", "chapter5", "chapter6"]

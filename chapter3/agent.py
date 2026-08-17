@@ -15,7 +15,6 @@ import requests
 
 from chapter1 import agent
 
-
 # Сколько сообщений хранить в памяти (сообщения user + assistant)
 MAX_HISTORY = 10
 

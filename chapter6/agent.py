@@ -4,8 +4,7 @@ import requests
 
 from chapter1 import agent as base
 from chapter4 import agent as chapter4_agent
-from chapter6.src import tools  # плагины регистрируются при импорте
-
+from chapter6.src import tools  # noqa: F401 — импорт ради регистрации плагинов
 
 PROJECT_RULES = r"""
 
@@ -48,11 +47,11 @@ def main():
     if not chapter4_agent.ensure_ollama_running():
         return
 
-    if not chapter4_agent.model_exists(chapter4_agent.MODEL):
-        print(chapter4_agent.model_not_found_message(chapter4_agent.MODEL))
+    if not chapter4_agent.model_exists(base.MODEL):
+        print(chapter4_agent.model_not_found_message(base.MODEL))
         return
 
-    chapter4_agent.preload_model(chapter4_agent.MODEL)
+    chapter4_agent.preload_model(base.MODEL)
     chapter4_agent.install_plugins()
 
     # Добавляем правила работы с проектом к промпту
@@ -68,10 +67,10 @@ def main():
     try:
         from chapter6.src.indexer import project_stats
         stats = project_stats()
-        print(f"\n🧠 Модель: {chapter4_agent.MODEL}")
+        print(f"\n🧠 Модель: {base.MODEL}")
         print(f"📚 Индекс проекта: {stats['files']} файлов, {stats['chunks']} фрагментов")
     except Exception:
-        print(f"\n🧠 Модель: {chapter4_agent.MODEL}")
+        print(f"\n🧠 Модель: {base.MODEL}")
 
     print("🛑 exit / quit / выход — для выхода.\n")
 

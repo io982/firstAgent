@@ -1,7 +1,8 @@
 """Плагины для RAG по документам проекта."""
 
 from chapter4.src import tools as chapter4_tools
-from .indexer import index_project, search_project, project_stats
+
+from .indexer import index_project, project_stats, search_project
 
 # Бюджет выдачи ask_project. Всё, что вернёт инструмент, попадает
 # в контекст модели, а он не резиновый — см. NUM_CTX в главе 6.

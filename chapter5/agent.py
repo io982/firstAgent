@@ -4,8 +4,10 @@ import requests
 
 from chapter1 import agent as base
 from chapter4 import agent as chapter4_agent
-from chapter5.src import tools  # импортируем плагины, они сами зарегистрируются
-from chapter5.src import vectorstore
+from chapter5.src import (
+    tools,  # noqa: F401 — импорт ради регистрации плагинов
+    vectorstore,
+)
 
 # Дополнительные правила для работы с долгосрочной памятью
 MEMORY_RULES = r"""
@@ -41,11 +43,11 @@ def main():
     if not chapter4_agent.ensure_ollama_running():
         return
 
-    if not chapter4_agent.model_exists(chapter4_agent.MODEL):
-        print(chapter4_agent.model_not_found_message(chapter4_agent.MODEL))
+    if not chapter4_agent.model_exists(base.MODEL):
+        print(chapter4_agent.model_not_found_message(base.MODEL))
         return
 
-    chapter4_agent.preload_model(chapter4_agent.MODEL)
+    chapter4_agent.preload_model(base.MODEL)
 
     # Подключаем плагины из Главы 4 (включая новые из Главы 5)
     chapter4_agent.install_plugins()
@@ -59,7 +61,7 @@ def main():
     except Exception as e:
         storage = f"{vectorstore.CHROMA_PERSIST_DIR} (не удалось открыть: {e})"
 
-    print(f"\n🧠 Модель: {chapter4_agent.MODEL}")
+    print(f"\n🧠 Модель: {base.MODEL}")
     print(f"💾 Векторная база: {storage}")
     print("🛑 exit / quit / выход — для выхода.\n")
 

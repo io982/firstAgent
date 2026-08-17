@@ -13,7 +13,6 @@ import requests
 from chapter1 import agent as base
 from chapter4.src import tools
 
-
 SYSTEM_PROMPT_TEMPLATE = """
 Ты — автономный агент-ассистент для разработчика.
 
@@ -111,14 +110,15 @@ def main():
             print(f"\nОшибка: {e}")
 
 
-if __name__ == "__main__":
-    main()
-
 # ============================================================
 # ПРОБРОС БАЗОВЫХ ФУНКЦИЙ ИЗ ГЛАВЫ 1
 # ============================================================
-# Это нужно, чтобы chapter5 мог использовать chapter4 как единый фасад
-# и не зависеть напрямую от chapter1.
+# Чтобы следующие главы вызывали одну точку входа, а не выясняли,
+# что взять из Главы 1, а что из Главы 4.
+#
+# Пробрасываем только функции. Конфигурацию (MODEL, VERBOSE, NUM_CTX)
+# главы читают напрямую из chapter1: скопированное сюда значение было бы
+# снимком на момент импорта и разошлось бы с оригиналом при любой правке.
 
 ensure_ollama_running = base.ensure_ollama_running
 model_exists = base.model_exists
@@ -126,6 +126,6 @@ model_not_found_message = base.model_not_found_message
 preload_model = base.preload_model
 ask_agent = base.ask_agent
 
-# Копируем конфигурацию
-MODEL = base.MODEL
-VERBOSE = base.VERBOSE
+
+if __name__ == "__main__":
+    main()

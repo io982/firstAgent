@@ -1,0 +1,42 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        # Нижняя граница из README и актуальная версия
+        python-version: ["3.10", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Установка зависимостей
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install ruff
+
+      - name: Линтер
+        run: ruff check .
+
+      - name: Компиляция всех модулей
+        run: python -m compileall -q chapter1 chapter2 chapter3 chapter4 chapter5 chapter6
+
+      # Ollama в CI нет, поэтому проверяем только то, что работает без модели:
+      # импорт всех глав, реестр плагинов, парсер вызовов, калькулятор, чанкинг.
+      - name: Проверки без модели
+        run: python ci_smoke.py

@@ -4,7 +4,8 @@ import hashlib
 from datetime import datetime
 
 from chapter4.src import tools as chapter4_tools
-from .vectorstore import add_document, search_documents, list_documents
+
+from .vectorstore import add_document, list_documents, search_documents
 
 
 def _generate_id(text: str) -> str:

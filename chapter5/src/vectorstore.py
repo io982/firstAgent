@@ -5,7 +5,8 @@ import os
 import chromadb
 
 from chapter1 import agent as base
-from .embeddings import get_embedding, get_embeddings
+
+from .embeddings import get_embedding
 
 # Локальная база в корне проекта.
 # Путь абсолютный: с относительным "./chroma_db" запуск из другой
@@ -36,9 +37,9 @@ def get_or_create_collection():
 def add_document(doc_id: str, text: str, metadata: dict = None):
     """Добавляет документ в векторную базу."""
     collection = get_or_create_collection()
-    
+
     embedding = get_embedding(text)
-    
+
     collection.add(
         ids=[doc_id],
         embeddings=[embedding],
@@ -50,14 +51,14 @@ def add_document(doc_id: str, text: str, metadata: dict = None):
 def search_documents(query: str, n_results: int = 5) -> list[dict]:
     """Ищет похожие документы по запросу."""
     collection = get_or_create_collection()
-    
+
     query_embedding = get_embedding(query)
-    
+
     results = collection.query(
         query_embeddings=[query_embedding],
         n_results=n_results
     )
-    
+
     documents = []
     for i in range(len(results["ids"][0])):
         documents.append({
@@ -66,7 +67,7 @@ def search_documents(query: str, n_results: int = 5) -> list[dict]:
             "metadata": results["metadatas"][0][i],
             "distance": results["distances"][0][i]
         })
-    
+
     return documents
 
 

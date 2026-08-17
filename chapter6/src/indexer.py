@@ -5,6 +5,7 @@ import os
 import chromadb
 
 from chapter1 import agent as base
+
 # Используем НОВЫЕ функции с префиксами для nomic-embed-text
 from chapter5.src.embeddings import get_document_embedding, get_query_embedding
 
@@ -24,7 +25,10 @@ SKIP_DIRS = {
 }
 
 CHUNK_SIZE = 1000
-CHUNK_OVERLAP = 200
+
+# Перекрытие между соседними чанками считается в строках, а не в символах:
+# так граница всегда проходит по целой строке кода.
+CHUNK_OVERLAP_LINES = 3
 
 # Минимальная длина чанка — короткие чанки не несут смысла
 MIN_CHUNK_LENGTH = 20
@@ -46,9 +50,10 @@ def get_project_collection():
     )
 
 
-def chunk_text_with_lines(text: str, chunk_size: int = CHUNK_SIZE, overlap_lines: int = 3) -> list:
+def chunk_text_with_lines(text: str, chunk_size: int = CHUNK_SIZE,
+                          overlap_lines: int = CHUNK_OVERLAP_LINES) -> list:
     """Разбивает текст на чанки по строкам.
-    
+
     Возвращает список пар: (чистый_текст, текст_с_номерами_строк).
     Чистый текст — для эмбеддинга, текст с номерами — для возврата модели.
     """
@@ -70,7 +75,7 @@ def chunk_text_with_lines(text: str, chunk_size: int = CHUNK_SIZE, overlap_lines
                 keep = current_lines[-overlap_lines:]
                 start_line_num = start_line_num + len(current_lines) - overlap_lines
                 current_lines = keep
-                current_size = sum(len(l) + 1 for l in keep)
+                current_size = sum(len(kept_line) + 1 for kept_line in keep)
             else:
                 start_line_num = start_line_num + len(current_lines)
                 current_lines = []
@@ -96,7 +101,7 @@ def _format_chunk(lines: list, start_line_num: int) -> str:
 def index_file(file_path: str, relative_path: str) -> int:
     """Индексирует один файл: читает, разбивает на чанки, сохраняет."""
     try:
-        with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+        with open(file_path, encoding="utf-8", errors="ignore") as f:
             content = f.read()
     except OSError:
         return 0
@@ -136,7 +141,9 @@ def index_file(file_path: str, relative_path: str) -> int:
     if not ids:
         return 0
 
-    collection.add(ids=ids, embeddings=embeddings, documents=documents, metadatas=metadatas)
+    # upsert, а не add: повторная индексация того же файла перезаписывает
+    # фрагменты, а не падает на дублирующихся id
+    collection.upsert(ids=ids, embeddings=embeddings, documents=documents, metadatas=metadatas)
     return len(ids)
 
 
@@ -149,7 +156,14 @@ def clear_project_index():
 
 
 def index_project(root_path: str = ".") -> dict:
-    """Индексирует весь проект: очищает старый индекс и создаёт новый."""
+    """Индексирует весь проект: очищает старый индекс и создаёт новый.
+
+    "." означает корень проекта, а не текущую директорию: агент индексирует
+    свой проект, из какой бы папки его ни запустили. Любой другой путь
+    используется как есть.
+    """
+    if root_path in {"", "."}:
+        root_path = base.PROJECT_ROOT
     root_path = os.path.abspath(os.path.expanduser(root_path))
 
     total_files = 0
@@ -168,7 +182,9 @@ def index_project(root_path: str = ".") -> dict:
                 continue
 
             full_path = os.path.join(dirpath, filename)
-            relative_path = os.path.relpath(full_path, root_path)
+            # Прямые слэши на всех системах: в промпте агента пути показаны
+            # как chapter1/agent.py, и модель не должна видеть два формата
+            relative_path = os.path.relpath(full_path, root_path).replace(os.sep, "/")
 
             try:
                 n_chunks = index_file(full_path, relative_path)

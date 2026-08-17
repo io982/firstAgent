@@ -1,6 +1,6 @@
 import requests
-from chapter1 import agent  # импортируем нашего первого агента
 
+from chapter1 import agent  # импортируем нашего первого агента
 
 # Режим вывода: True = видно все шаги, False = только результат
 VERBOSE = False

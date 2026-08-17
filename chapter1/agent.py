@@ -1,13 +1,13 @@
-import json
-import os
 import ast
+import json
 import operator
+import os
 import re
 import subprocess
 import sys
 import time
-import requests
 
+import requests
 
 OLLAMA_URL = "http://localhost:11434/api/chat"
 OLLAMA_BASE = "http://localhost:11434"
@@ -95,7 +95,7 @@ def is_ollama_running() -> bool:
 def start_ollama_server():
     """Запускает ollama serve как фоновый процесс."""
     print("🚀 Запускаю сервер Ollama...")
-    
+
     # В Windows ollama обычно в PATH
     # Используем CREATE_NEW_PROCESS_GROUP, чтобы сервер жил отдельно от нашего скрипта
     kwargs = {}
@@ -104,7 +104,7 @@ def start_ollama_server():
         # Скрываем окно процесса
         kwargs["stdout"] = subprocess.DEVNULL
         kwargs["stderr"] = subprocess.DEVNULL
-    
+
     try:
         # Запускаем в фоне, не блокируя наш скрипт
         process = subprocess.Popen(
@@ -126,13 +126,13 @@ def wait_for_ollama(timeout: int = 30) -> bool:
     """Ждёт, пока сервер Ollama начнёт отвечать."""
     print(f"⏳ Ожидание запуска сервера (до {timeout} сек)...")
     start_time = time.time()
-    
+
     while time.time() - start_time < timeout:
         if is_ollama_running():
             print("✅ Сервер Ollama готов к работе!")
             return True
         time.sleep(1)
-    
+
     print("❌ Сервер Ollama не запустился за отведённое время.")
     return False
 
@@ -142,10 +142,10 @@ def ensure_ollama_running() -> bool:
     if is_ollama_running():
         print("✅ Сервер Ollama уже работает.")
         return True
-    
+
     if not start_ollama_server():
         return False
-    
+
     return wait_for_ollama()
 
 
@@ -210,7 +210,7 @@ def preload_model(model_name: str):
             },
             timeout=120  # первая загрузка может быть долгой
         )
-        
+
         if response.status_code == 200:
             print(f"✅ Модель '{model_name}' готова к работе!")
         else:
@@ -312,7 +312,7 @@ def read_file(path: str, max_chars: int = 8000) -> str:
     if not os.path.isfile(path):
         return f"Это не файл: {path}"
     try:
-        with open(path, "r", encoding="utf-8", errors="replace") as f:
+        with open(path, encoding="utf-8", errors="replace") as f:
             content = f.read(max_chars + 1)
         if len(content) > max_chars:
             content = content[:max_chars] + "\n\n... [файл обрезан] ..."
@@ -332,7 +332,7 @@ def search_in_file(path: str, query: str, max_results: int = 20) -> str:
     try:
         results = []
         query_lower = query.lower()
-        with open(path, "r", encoding="utf-8", errors="replace") as f:
+        with open(path, encoding="utf-8", errors="replace") as f:
             for line_number, line in enumerate(f, start=1):
                 if query_lower in line.lower():
                     results.append(f"{line_number}: {line.rstrip()}")
@@ -386,6 +386,49 @@ def normalize_potential_tool(obj):
         if name in KNOWN_TOOLS:
             return {"name": name, "arguments": function_obj.get("arguments", {})}
     return None
+
+
+def extract_unknown_tool_names(text: str) -> list:
+    """Ищет в ответе вызовы инструментов, которых у агента нет.
+
+    Модель регулярно придумывает несуществующие имена. Такой JSON не проходит
+    фильтр KNOWN_TOOLS, агент считает его обычным текстом — и пользователь
+    получает в ответ сырой JSON вместо объяснения. Находим эти вызовы, чтобы
+    вернуть модели внятную ошибку и дать ей исправиться.
+    """
+    names = []
+
+    def collect(obj):
+        if not isinstance(obj, dict):
+            return
+        for candidate in (obj, obj.get("function")):
+            if isinstance(candidate, dict):
+                name = candidate.get("name")
+                if isinstance(name, str) and name and name not in KNOWN_TOOLS:
+                    if "arguments" in candidate or "parameters" in candidate:
+                        names.append(name)
+
+    for block in re.findall(r"```(?:json)?\s*(.*?)\s*```", text, re.DOTALL):
+        try:
+            collect(json.loads(block))
+        except Exception:
+            pass
+
+    decoder = json.JSONDecoder()
+    pos = 0
+    while pos < len(text):
+        start = text.find("{", pos)
+        if start == -1:
+            break
+        try:
+            obj, end = decoder.raw_decode(text, start)
+            collect(obj)
+            pos = end
+        except json.JSONDecodeError:
+            pos = start + 1
+
+    # Порядок сохраняем, дубли убираем
+    return list(dict.fromkeys(names))
 
 
 def extract_tool_calls(text: str):
@@ -470,6 +513,22 @@ def ask_agent(user_task: str) -> str:
         tool_calls = extract_tool_calls(content)
 
         if not tool_calls:
+            # Модель могла вызвать несуществующий инструмент. Отдавать такой
+            # JSON пользователю бессмысленно — возвращаем ошибку модели.
+            unknown = extract_unknown_tool_names(content)
+            if unknown:
+                if VERBOSE:
+                    print(f"[Agent] Неизвестные инструменты: {', '.join(unknown)}")
+                messages.append({"role": "assistant", "content": content})
+                messages.append({
+                    "role": "user",
+                    "content": (
+                        f"Инструмента {unknown[0]} не существует. "
+                        f"Доступные инструменты: {', '.join(sorted(KNOWN_TOOLS))}. "
+                        "Вызови подходящий из списка или ответь пользователю обычным текстом."
+                    )
+                })
+                continue
             return content.strip()
 
         messages.append({"role": "assistant", "content": content})
@@ -503,15 +562,15 @@ def main():
     if not ensure_ollama_running():
         print("\n❌ Не удалось запустить Ollama. Завершение работы.")
         return
-    
+
     print(f"\n🔍 Проверяю модель '{MODEL}'...")
     if not model_exists(MODEL):
         print(model_not_found_message(MODEL))
         return
-    print(f"✅ Модель готова.")
-    
+    print("✅ Модель готова.")
+
     preload_model(MODEL)
-    
+
     if VERBOSE:
         print("\n" + "=" * 60)
         print(f"🧠 Модель: {MODEL}")

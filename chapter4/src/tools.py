@@ -23,8 +23,6 @@ import requests
 # РЕЕСТР ИНСТРУМЕНТОВ
 # ====================================================================
 
-import inspect
-
 # name -> {"func": callable, "description": str, "parameters": dict}
 TOOL_REGISTRY = {}
 
@@ -35,23 +33,23 @@ def _extract_parameters(func) -> dict:
     params = {}
     for param_name, param in sig.parameters.items():
         param_info = {"type": "any"}
-        
+
         if param.annotation != inspect.Parameter.empty:
-            if param.annotation == str:
+            if param.annotation is str:
                 param_info["type"] = "string"
-            elif param.annotation == int:
+            elif param.annotation is int:
                 param_info["type"] = "integer"
-            elif param.annotation == float:
+            elif param.annotation is float:
                 param_info["type"] = "number"
-            elif param.annotation == bool:
+            elif param.annotation is bool:
                 param_info["type"] = "boolean"
-        
+
         if param.default != inspect.Parameter.empty:
             param_info["required"] = False
             param_info["default"] = param.default
         else:
             param_info["required"] = True
-        
+
         params[param_name] = param_info
     return params
 
@@ -101,7 +99,7 @@ def render_tools_for_prompt() -> str:
     lines = []
     for number, (name, entry) in enumerate(TOOL_REGISTRY.items(), 1):
         line = f"{number}. {name} — {entry['description']}"
-        
+
         params = entry.get("parameters", {})
         if params:
             param_parts = []
@@ -112,7 +110,7 @@ def render_tools_for_prompt() -> str:
                     default = pinfo.get("default")
                     param_parts.append(f'{pname} ({pinfo["type"]}, по умолчанию: {default!r})')
             line += f"\n   Параметры: {', '.join(param_parts)}"
-        
+
         lines.append(line)
     return "\n".join(lines)
 
@@ -189,7 +187,7 @@ def read_file(path: str, max_chars: int = 8000) -> str:
     path = os.path.abspath(os.path.expanduser(path))
     if not os.path.isfile(path):
         return f"Файл не найден: {path}"
-    with open(path, "r", encoding="utf-8", errors="replace") as f:
+    with open(path, encoding="utf-8", errors="replace") as f:
         content = f.read(max_chars + 1)
     if len(content) > max_chars:
         content = content[:max_chars] + "\n\n... [файл обрезан] ..."
@@ -204,7 +202,7 @@ def search_in_file(path: str, query: str, max_results: int = 20) -> str:
         return "Не указан текст для поиска"
     results = []
     query_lower = query.lower()
-    with open(path, "r", encoding="utf-8", errors="replace") as f:
+    with open(path, encoding="utf-8", errors="replace") as f:
         for line_number, line in enumerate(f, start=1):
             if query_lower in line.lower():
                 results.append(f"{line_number}: {line.rstrip()}")
@@ -254,7 +252,7 @@ def search_in_directory(path: str = ".", query: str = "", max_results: int = 30)
             full_path = os.path.join(root, name)
             try:
                 matches_in_file = 0
-                with open(full_path, "r", encoding="utf-8", errors="ignore") as f:
+                with open(full_path, encoding="utf-8", errors="ignore") as f:
                     for line_number, line in enumerate(f, start=1):
                         if query_lower in line.lower():
                             relative = os.path.relpath(full_path, path)

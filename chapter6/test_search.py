@@ -1,5 +1,5 @@
 """Диагностика: работает ли поиск по индексу проекта."""
-from chapter6.src.indexer import search_project, project_stats
+from chapter6.src.indexer import project_stats, search_project
 
 print("=" * 60)
 print("Статистика индекса:", project_stats())
