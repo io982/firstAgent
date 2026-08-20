@@ -8,6 +8,7 @@
 часть кода: та, где нет ни модели, ни сети, ни случайности.
 """
 
+import os
 import sys
 
 failures = []
@@ -30,6 +31,9 @@ from chapter4.src import tools as registry  # noqa: E402
 from chapter5.src import tools as memory_tools  # noqa: E402, F401
 from chapter6.src import indexer  # noqa: E402
 from chapter6.src import tools as project_tools  # noqa: E402, F401
+from chapter7.src import bm25 as hybrid_bm25  # noqa: E402
+from chapter7.src import indexer as hybrid_indexer  # noqa: E402
+from chapter7.src import tools as hybrid_tools  # noqa: E402
 
 check("все главы импортируются", True)
 
@@ -126,6 +130,55 @@ else:
     check("номера строк идут подряд", True)
 
 check("пустой текст не даёт чанков с содержимым", indexer.chunk_text_with_lines("") == [("", "1: ")])
+
+print("\nГлава 7: слияние двух поисков (RRF)")
+ranks = hybrid_indexer._rrf_contribution(["первый", "второй", "третий"])
+check("вклад убывает с местом", ranks["первый"] > ranks["второй"] > ranks["третий"])
+check(
+    "формула 1/(k + место)",
+    abs(ranks["первый"] - 1.0 / (hybrid_indexer.RRF_K + 1)) < 1e-9,
+)
+
+# Ради этого свойства RRF и выбран: документ, найденный обоими способами,
+# обгоняет документ, который лишь чуть выше в одном списке.
+vector_list = ["A", "B"]
+bm25_list = ["B", "C"]
+merged = hybrid_indexer._rrf_contribution(vector_list)
+for doc_id, value in hybrid_indexer._rrf_contribution(bm25_list).items():
+    merged[doc_id] = merged.get(doc_id, 0.0) + value
+check("найденное обоими способами выигрывает", merged["B"] > merged["A"] > merged["C"])
+
+print("\nГлава 7: BM25")
+docs = [
+    {"id": "impl", "text": "def calculator(expression): return ast.parse(expression)", "metadata": {}},
+    {"id": "mention", "text": "в этом разделе calculator только упоминается", "metadata": {}},
+    {"id": "other", "text": "совершенно посторонний текст про погоду", "metadata": {}},
+]
+index = hybrid_bm25.SimpleBM25(docs)
+found = index.search("def calculator")
+check("реализация выше упоминания", found and found[0]["id"] == "impl")
+check("нерелевантное не попадает в выдачу", all(r["id"] != "other" for r in found))
+check("токены посчитаны один раз при построении", len(index.doc_tokens) == len(docs))
+
+print("\nГлава 7: бюджет выдачи")
+long_text = "\n".join(f"{i}: строка кода номер {i}" for i in range(1, 200))
+trimmed = hybrid_tools._trim_to_whole_lines(long_text, 300)
+check("обрезано до лимита", len(trimmed) < 400, f"длина {len(trimmed)}")
+check("метка обрезки на месте", trimmed.endswith("... [фрагмент обрезан] ..."))
+check(
+    "каждая строка сохранила номер",
+    all(part.split(":")[0].isdigit() for part in trimmed.split("\n")[:-1]),
+)
+check("короткий текст не трогаем", hybrid_tools._trim_to_whole_lines("1: коротко", 300) == "1: коротко")
+check("бюджет фрагмента строже общего", hybrid_tools.MAX_FRAGMENT_CHARS < hybrid_tools.MAX_TOTAL_CHARS)
+
+print("\nГлава 7: индекс отделён от Главы 6")
+check(
+    "коллекции разные",
+    hybrid_indexer.PROJECT_COLLECTION != "project_files",
+    hybrid_indexer.PROJECT_COLLECTION,
+)
+check("путь к базе абсолютный", os.path.isabs(hybrid_indexer.CHROMA_PERSIST_DIR))
 
 print()
 if failures:
