@@ -15,6 +15,7 @@ from chapter8.src.probe import FORMAT_NATIVE, FORMAT_TEXT, probe_tool_format
 # Модели, на которых снимался замер 20 августа 2026, и ожидаемый результат.
 # Расхождение будет видно сразу, если Ollama или модель изменят поведение.
 KNOWN_MODELS = [
+    ("qwen2.5:3b", FORMAT_NATIVE),          # модель по умолчанию
     ("qwen2_5coder3b_q5:latest", FORMAT_TEXT),
     ("qwen2.5-coder:7b", FORMAT_TEXT),
     ("llama3.1:8b", FORMAT_NATIVE),

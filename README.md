@@ -59,7 +59,7 @@
 - **ОС:** Windows 10/11, Linux или macOS
 - Python 3.10+
 - [Ollama](https://ollama.com)
-- Модель по умолчанию: `qwen2_5coder3b_q5:latest` — Q5-сборка `qwen2.5-coder:3b` (см. ниже)
+- Модель по умолчанию: `qwen2.5:3b` (~1.9 GB) — ставится одним `ollama pull`
 - Модель эмбеддингов для Глав 5–7: `nomic-embed-text` (~274 MB)
 - Рекомендуется дополнительно: `llama3.1:8b` (~4.9 GB) — когда важна точность ответов
 - **(GPU):** NVIDIA с 4+ GB видеопамяти (VRAM) для модели 3B, 8+ GB — для 8B
@@ -169,9 +169,9 @@ ollama list
 Модель скачивается один раз и остаётся на диске:
 
 ```bash
-ollama pull qwen2.5-coder:3b      # основная модель, ~1.9 GB
+ollama pull qwen2.5:3b            # основная модель, ~1.9 GB
 ollama pull nomic-embed-text      # эмбеддинги для Глав 5-7, ~274 MB
-ollama pull llama3.1:8b           # точные ответы и нативные tool_calls, ~4.9 GB
+ollama pull llama3.1:8b           # точные ответы, ~4.9 GB (необязательно)
 ```
 
 Третья строка необязательна для первых глав, но пригодится начиная с Главы 7:
@@ -244,15 +244,15 @@ ollama list
 Вы должны увидеть список установленных моделей:
 
 ```text
-NAME                        ID              SIZE      MODIFIED
-nomic-embed-text:latest     0a109f422b47    274 MB    29 hours ago
-qwen2_5coder3b_q5:latest    f2972a356413    2.4 GB    7 weeks ago
+NAME                       ID              SIZE      MODIFIED
+qwen2.5:3b                 357c53fb659c    1.9 GB    2 minutes ago
+nomic-embed-text:latest    0a109f422b47    274 MB    5 minutes ago
 ```
 
 Проверьте, что модель поддерживает инструменты:
 
 ```bash
-ollama show qwen2_5coder3b_q5:latest
+ollama show qwen2.5:3b
 ```
 
 В выводе должна быть строка:
@@ -280,7 +280,7 @@ import requests
 response = requests.post(
     "http://localhost:11434/api/chat",
     json={
-        "model": "qwen2_5coder3b_q5:latest",
+        "model": "qwen2.5:3b",
         "messages": [
             {"role": "user", "content": "Напиши функцию факториала на Python"}
         ],

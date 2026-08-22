@@ -37,11 +37,16 @@ OLLAMA_BASE = "http://localhost:11434"
 # Нужен, чтобы данные (например, векторная база) всегда лежали в одном
 # месте и не зависели от того, из какой директории запущен агент.
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-# Модель по умолчанию — кастомная Q5-сборка qwen2.5-coder:3b.
-# Другая модель подключается через переменную окружения, править код не нужно:
-#   Windows (PowerShell): $env:AGENT_MODEL = "qwen2.5-coder:3b"
-#   Linux / macOS:        export AGENT_MODEL=qwen2.5-coder:3b
-MODEL = os.getenv("AGENT_MODEL", "qwen2_5coder3b_q5:latest")
+# Модель по умолчанию. Выбрана не по размеру, а по трём свойствам:
+# ставится одним `ollama pull`, целиком помещается в 4 GB видеопамяти
+# и умеет нативные вызовы инструментов (Глава 8). Instruct-версия, а не
+# Coder: Coder-модели пишут код лучше, но вызовы функций им не давали
+# при обучении — подробности в разделе «Выбор модели» README.
+#
+# Другая модель подключается переменной окружения, править код не нужно:
+#   Windows (PowerShell): $env:AGENT_MODEL = "llama3.1:8b"
+#   Linux / macOS:        export AGENT_MODEL=llama3.1:8b
+MODEL = os.getenv("AGENT_MODEL", "qwen2.5:3b")
 # Флаг режима вывода
 # True  = подробный режим (видно все итерации, вызовы инструментов)
 # False = чистый режим (только финальный ответ)
