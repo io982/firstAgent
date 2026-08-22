@@ -34,6 +34,9 @@ from chapter6.src import tools as project_tools  # noqa: E402, F401
 from chapter7.src import bm25 as hybrid_bm25  # noqa: E402
 from chapter7.src import indexer as hybrid_indexer  # noqa: E402
 from chapter7.src import tools as hybrid_tools  # noqa: E402
+from chapter8.src import native as dual  # noqa: E402
+from chapter8.src import probe as fmt_probe  # noqa: E402
+from chapter8.src import schema as tool_schema  # noqa: E402
 
 check("все главы импортируются", True)
 
@@ -179,6 +182,64 @@ check(
     hybrid_indexer.PROJECT_COLLECTION,
 )
 check("путь к базе абсолютный", os.path.isabs(hybrid_indexer.CHROMA_PERSIST_DIR))
+
+print("\nГлава 8: инструменты в JSON Schema")
+schemas = tool_schema.registry_to_schemas()
+by_name = {item["function"]["name"]: item["function"] for item in schemas}
+check("схема собрана для каждого инструмента", len(schemas) == len(registry.TOOL_REGISTRY))
+check("форма записи как ждёт Ollama", all(item["type"] == "function" for item in schemas))
+
+calc = by_name["calculator"]["parameters"]
+check("обязательный параметр помечен", calc["required"] == ["expression"])
+check("тип параметра переведён", calc["properties"]["expression"]["type"] == "string")
+
+reader = by_name["read_file"]["parameters"]
+check("параметр со значением по умолчанию не обязателен", "max_chars" not in reader["required"])
+check("значение по умолчанию подсказано модели",
+      "8000" in reader["properties"]["max_chars"].get("description", ""))
+
+# Реестр Главы 4 перечисляет в параметрах и **kwargs. В промпте это безвредно,
+# а в схеме превратилось бы в обязательное поле "kwargs".
+remember_schema = by_name["remember"]["parameters"]
+check("**kwargs не попал в схему", "kwargs" not in remember_schema["properties"])
+
+print("\nГлава 8: разбор двух форматов")
+native_message = {
+    "content": "",
+    "tool_calls": [{"function": {"name": "calculator", "arguments": {"expression": "2+2"}}}],
+}
+check(
+    "нативный вызов приведён к виду Главы 1",
+    dual.extract_native_calls(native_message)
+    == [{"name": "calculator", "arguments": {"expression": "2+2"}}],
+)
+check("нативный формат распознан", dual.extract_calls_any_format(native_message)[1] == dual.FORMAT_NATIVE)
+
+text_message = {"content": '{"name": "calculator", "arguments": {"expression": "2+2"}}'}
+calls, used = dual.extract_calls_any_format(text_message)
+check("текстовый формат распознан", used == dual.FORMAT_TEXT and len(calls) == 1)
+check("мусор в tool_calls не роняет разбор",
+      dual.extract_native_calls({"tool_calls": [None, {}, {"function": {}}]}) == [])
+
+print("\nГлава 8: промпт под протокол")
+native_prompt = dual.system_prompt_for(dual.FORMAT_NATIVE)
+text_prompt = dual.system_prompt_for(dual.FORMAT_TEXT)
+check("для форматов промпты разные", native_prompt != text_prompt)
+check(
+    "нативный промпт не учит текстовому протоколу",
+    '{"name"' not in native_prompt and "Observation" not in native_prompt,
+)
+check("нативный промпт не перечисляет инструменты сам", "calculator" not in native_prompt)
+check("текстовый промпт остался прежним", text_prompt == base.SYSTEM_PROMPT)
+
+print("\nГлава 8: определение формата")
+check("форматы различимы",
+      len({fmt_probe.FORMAT_NATIVE, fmt_probe.FORMAT_TEXT, fmt_probe.FORMAT_UNKNOWN}) == 3)
+check("вызов пробного инструмента опознан",
+      fmt_probe._mentions_probe_tool('{"name": "probe_add", "arguments": {"a": 2, "b": 3}}'))
+check("упоминание имени вызовом не считается",
+      not fmt_probe._mentions_probe_tool("инструмент probe_add складывает числа"))
+check("пустой ответ вызовом не считается", not fmt_probe._mentions_probe_tool(""))
 
 print()
 if failures:
