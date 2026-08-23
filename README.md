@@ -581,18 +581,12 @@ client = OpenAI(base_url="http://localhost:8080/v1", api_key="empty")
 
 Типы (условно)
 
-* General-purpose. Универсальные модели. 
-> Подходят для: диалога; анализа текста; суммаризации; простых агентов; tool calling.
-* Reasoning models. Модели, оптимизированные под более сложные рассуждения. 
-> Используются для: planning; decomposition; математики; сложного анализа; verification.
+* General-purpose. Универсальные модели. Подходят для: диалога; анализа текста; суммаризации; простых агентов; tool calling.
+* Reasoning models. Модели, оптимизированные под более сложные рассуждения. Используются для: planning; decomposition; математики; сложного анализа; verification.
 * Coding models. Специализированы на программировании. 
->
-* Agentic models. Некоторые модели специально оптимизируются для агентных сценариев. 
-> Для них важны: instruction following; tool calling; planning; long context; устойчивость в многошаговых задачах.
+* Agentic models. Некоторые модели специально оптимизируются для агентных сценариев. Для них важны: instruction following; tool calling; planning; long context; устойчивость в многошаговых задачах.
 * Vision / Multimodal. Модели, которые могут работать с изображениями. 
->
-* Embedding models. такая модель не должна отвечать пользователю. Она превращает текст в вектор:
-> Такие модели используются для: semantic search; RAG; similarity search; memory retrieval.
+* Embedding models. такая модель не должна отвечать пользователю. Она превращает текст в вектор. Такие модели используются для: semantic search; RAG; similarity search; memory retrieval.
 
 ---
 
