@@ -1142,7 +1142,7 @@ graph TD
     Decision -- Нет --> FinalAnswer([✅ Финальный ответ])
     MaxIter[⏱️ Лимит итераций] -.-> FinalAnswer
     
-    classDef defaultStyle fill:#f9f9f9,stroke:#333,stroke-width:1px;
+    classDef defaultStyle fill:#f9f9f9,stroke:#333,stroke-width:5px;
     classDef decisionStyle fill:#fff2cc,stroke:#333,stroke-width:2px;
     classDef actionStyle fill:#d5e8d4,stroke:#333,stroke-width:2px;
     classDef finishStyle fill:#f8cecc,stroke:#333,stroke-width:2px;
