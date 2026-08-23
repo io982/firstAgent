@@ -175,7 +175,7 @@ def extract_json_from_text(text: str) -> dict | None:
                 return parsed
         except json.JSONDecodeError:
             pass
-    
+
     start = text.find("{")
     if start != -1:
         end = text.rfind("}")
@@ -199,7 +199,7 @@ def extract_unknown_tool_names(text: str) -> list:
                 names.append(obj["tool"])
         except json.JSONDecodeError:
             pass
-    
+
     start = text.find("{")
     if start != -1:
         end = text.rfind("}")
@@ -217,7 +217,7 @@ def execute_tool(tool_name: str, args: dict) -> str:
     if tool_name not in TOOLS:
         available = ", ".join(TOOLS.keys())
         return f"Ошибка: инструмент '{tool_name}' не найден. Доступные: {available}."
-    
+
     func = TOOLS[tool_name]
     try:
         return str(func(**args))
@@ -254,9 +254,9 @@ def ask_agent(user_query: str) -> str:
     for iteration in range(1, MAX_ITERATIONS + 1):
         if VERBOSE:
             print(f"\n[Итерация {iteration}/{MAX_ITERATIONS}]")
-        
+
         response_text = request_model(messages)
-        
+
         if VERBOSE:
             print(f"🤖 Ответ модели:\n{response_text}")
 
@@ -272,19 +272,19 @@ def ask_agent(user_query: str) -> str:
             continue
 
         parsed = extract_json_from_text(response_text)
-        
+
         if parsed and isinstance(parsed, dict) and "tool" in parsed:
             tool_name = parsed["tool"]
             args = parsed.get("args", {})
-            
+
             if VERBOSE:
                 print(f"⚙️ Вызов инструмента: {tool_name} с аргументами {args}")
-            
+
             observation = execute_tool(tool_name, args)
-            
+
             if VERBOSE:
                 print(f"👁️ Наблюдение (результат): {observation}")
-            
+
             messages.append({"role": "assistant", "content": response_text})
             messages.append({"role": "user", "content": f"Результат инструмента: {observation}"})
             continue
@@ -314,16 +314,16 @@ def main():
             if query.lower() in ["выход", "exit", "quit"]:
                 print("👋 Пока!")
                 break
-            
+
             if not VERBOSE:
                 print("⏳ Думаю...")
-                
+
             answer = ask_agent(query)
-            
+
             print("\n" + "=" * 50)
             print(f"✅ Финальный ответ:\n{answer}")
             print("=" * 50 + "\n")
-            
+
         except KeyboardInterrupt:
             print("\n\n👋 Завершение работы.")
             break
