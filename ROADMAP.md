@@ -8,67 +8,7 @@
 
 # Глава 1. Первый AI Agent — ReAct
 
-**Статус: CORE**
-
-Создаём первого локального агента.
-
-## 1.1. LLM vs Agent
-
-* Что такое агент
-* Agent loop
-* State
-* Observation
-* Action
-* Tool
-
-## 1.2. ReAct
-
-* Reason
-* Act
-* Observe
-* Iteration
-* Stopping conditions
-
-## 1.3. Первый агент
-
-* Python
-* Ollama API
-* System prompt
-* User prompt
-* Message history
-* Agent loop
-
-## 1.4. Первые tools
-
-* Calculator
-* Date/time
-* Простые Python functions
-
-## 1.5. Ошибки
-
-* Invalid action
-* Tool errors
-* Retry
-* Timeout
-* Maximum iterations
-
-### Практический результат
-
-Небольшая модель самостоятельно:
-
-```
-получает задачу
-     ↓
-   думает
-     ↓
-выбирает tool
-     ↓
-получает результат
-     ↓
-продолжает
-     ↓
-  отвечает
-```
+**Статус: ✅ ГОТОВО** — [текст в README.md](README.md#глава-1-первый-ai-agent--react)
 
 ---
 

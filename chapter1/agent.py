@@ -1,257 +1,35 @@
-"""Глава 1. Базовый ReAct-агент на Ollama.
-
-Это ядро всего курса: главы 2-8 не переписывают его, а подменяют в нём
-отдельные части (см. раздел «Как устроен репозиторий» в README).
-
-Файл читается сверху вниз, но при первом чтении половину можно пропустить.
-Порядок такой:
-
-    1. Конфигурация          MODEL, MAX_ITERATIONS, NUM_CTX, KEEP_ALIVE
-    2. SYSTEM_PROMPT         договорённость с моделью о формате вызова
-    3. Автозапуск Ollama     ← можно пропустить: удобство, не суть
-    4. Инструменты           calculator, list_directory, read_file, ...
-    5. Разбор ответа модели  extract_tool_calls и его помощники
-    6. Ядро                  request_model + ask_agent  ← главное здесь
-    7. main()                REPL: спросить, ответить, повторить
-
-Если хочется понять агента за пять минут — читайте SYSTEM_PROMPT
-и ask_agent, между ними вся суть: договорились о формате, попросили,
-разобрали ответ, выполнили, вернули результат модели.
 """
-
+Глава 1: Базовый агент с ReAct-паттерном.
+Реализация: Ollama API + JSON-парсинг + безопасные инструменты + обработка ошибок.
+"""
 import ast
+import inspect
 import json
 import operator
-import os
 import re
 import subprocess
 import sys
 import time
+from datetime import datetime
 
 import requests
 
+# ====================================================================
+# 1. КОНФИГУРАЦИЯ
+# ====================================================================
 OLLAMA_URL = "http://localhost:11434/api/chat"
 OLLAMA_BASE = "http://localhost:11434"
 
-# Корень проекта — на уровень выше папки chapter1.
-# Нужен, чтобы данные (например, векторная база) всегда лежали в одном
-# месте и не зависели от того, из какой директории запущен агент.
-PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-# Модель по умолчанию. Выбрана не по размеру, а по трём свойствам:
-# ставится одним `ollama pull`, целиком помещается в 4 GB видеопамяти
-# и умеет нативные вызовы инструментов (Глава 8). Instruct-версия, а не
-# Coder: Coder-модели пишут код лучше, но вызовы функций им не давали
-# при обучении — подробности в разделе «Выбор модели» README.
-#
-# Другая модель подключается переменной окружения, править код не нужно:
-#   Windows (PowerShell): $env:AGENT_MODEL = "llama3.1:8b"
-#   Linux / macOS:        export AGENT_MODEL=llama3.1:8b
-MODEL = os.getenv("AGENT_MODEL", "qwen2.5:3b")
-# Флаг режима вывода
-# True  = подробный режим (видно все итерации, вызовы инструментов)
-# False = чистый режим (только финальный ответ)
+MODEL = "qwen2.5:3b"
+MAX_ITERATIONS = 5
+NUM_CTX = 4096
+KEEP_ALIVE = "5m"
+#VERBOSE = True
 VERBOSE = False
 
-MAX_ITERATIONS = 8
-
-# Размер контекстного окна модели.
-# Главам с большими Observation (RAG) его не хватает — они поднимают
-# значение сами: base.NUM_CTX = 8192.
-NUM_CTX = 4096
-
-# Сколько держать модель в памяти после последнего запроса
-# "5m" = 5 минут, "0" = выгружать сразу, "-1" = никогда не выгружать
-KEEP_ALIVE = "5m"
-
-KNOWN_TOOLS = {
-    "calculator",
-    "list_directory",
-    "read_file",
-    "search_in_file"
-}
-
-
-SYSTEM_PROMPT = """
-Ты — автономный агент-ассистент для разработчика.
-
-У тебя есть инструменты:
-1. calculator — безопасно считает арифметические выражения.
-2. list_directory — показывает файлы и папки в директории.
-3. read_file — читает текстовый файл.
-4. search_in_file — ищет текст в файле.
-
-Формат вызова инструмента:
-{"name": "имя_инструмента", "arguments": {...}}
-
-Примеры:
-
-User: Посчитай 2+2
-Assistant: {"name": "calculator", "arguments": {"expression": "2+2"}}
-User: Observation from calculator: 4
-Assistant: 2 + 2 = 4
-
-User: Покажи файлы в текущей папке
-Assistant: {"name": "list_directory", "arguments": {"path": "."}}
-User: Observation from list_directory: [FILE] agent.py
-Assistant: В текущей папке есть файл agent.py
-
-Правила:
-1. Если нужен инструмент, ответь ТОЛЬКО JSON-вызовом или несколькими JSON-вызовами.
-2. Не добавляй пояснения до или после JSON при вызове инструмента.
-3. После получения Observation проанализируй результат.
-4. Если нужно вызвать ещё инструмент — снова верни JSON.
-5. Когда готов дать финальный ответ пользователю, ответь обычным текстом без JSON.
-6. Никогда не выдумывай результаты инструментов.
-""".strip()
-
-
 # ====================================================================
-# АВТОЗАПУСК OLLAMA
+# 2. ИНСТРУМЕНТЫ (TOOLS)
 # ====================================================================
-
-def is_ollama_running() -> bool:
-    """Проверяет, отвечает ли сервер Ollama на порту 11434."""
-    try:
-        response = requests.get(OLLAMA_BASE, timeout=3)
-        return response.status_code == 200
-    except requests.exceptions.RequestException:
-        return False
-
-
-def start_ollama_server():
-    """Запускает ollama serve как фоновый процесс."""
-    print("🚀 Запускаю сервер Ollama...")
-
-    # В Windows ollama обычно в PATH
-    # Используем CREATE_NEW_PROCESS_GROUP, чтобы сервер жил отдельно от нашего скрипта
-    kwargs = {}
-    if sys.platform == "win32":
-        kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
-        # Скрываем окно процесса
-        kwargs["stdout"] = subprocess.DEVNULL
-        kwargs["stderr"] = subprocess.DEVNULL
-
-    try:
-        # Запускаем в фоне, не блокируя наш скрипт
-        process = subprocess.Popen(
-            ["ollama", "serve"],
-            **kwargs
-        )
-        print(f"✅ Сервер Ollama запущен (PID: {process.pid})")
-        return True
-    except FileNotFoundError:
-        print("❌ Ошибка: команда 'ollama' не найдена.")
-        print("   Убедись, что Ollama установлена и добавлена в PATH.")
-        return False
-    except Exception as e:
-        print(f"❌ Не удалось запустить Ollama: {e}")
-        return False
-
-
-def wait_for_ollama(timeout: int = 30) -> bool:
-    """Ждёт, пока сервер Ollama начнёт отвечать."""
-    print(f"⏳ Ожидание запуска сервера (до {timeout} сек)...")
-    start_time = time.time()
-
-    while time.time() - start_time < timeout:
-        if is_ollama_running():
-            print("✅ Сервер Ollama готов к работе!")
-            return True
-        time.sleep(1)
-
-    print("❌ Сервер Ollama не запустился за отведённое время.")
-    return False
-
-
-def ensure_ollama_running() -> bool:
-    """Гарантирует, что сервер Ollama запущен."""
-    if is_ollama_running():
-        print("✅ Сервер Ollama уже работает.")
-        return True
-
-    if not start_ollama_server():
-        return False
-
-    return wait_for_ollama()
-
-
-def list_installed_models() -> list:
-    """Возвращает имена моделей, установленных в Ollama."""
-    try:
-        response = requests.get(f"{OLLAMA_BASE}/api/tags", timeout=5)
-        if response.status_code != 200:
-            return []
-        return [m.get("name", "") for m in response.json().get("models", [])]
-    except Exception:
-        return []
-
-
-def model_exists(model_name: str) -> bool:
-    """Проверяет, установлена ли модель в Ollama.
-
-    Имя без тега ("qwen2.5-coder") подходит к любому тегу.
-    Имя с тегом ("qwen2.5-coder:3b") требует именно этот тег,
-    чтобы установленная 7b не выдавала себя за запрошенную 3b.
-    """
-    installed = list_installed_models()
-
-    for name in installed:
-        if name == model_name:
-            return True
-        # Ollama показывает "модель:latest", запрашивать можно без тега
-        if ":" not in model_name and name == f"{model_name}:latest":
-            return True
-        if ":" not in model_name and name.startswith(f"{model_name}:"):
-            return True
-
-    return False
-
-
-def model_not_found_message(model_name: str) -> str:
-    """Подсказка, что делать, если модель не найдена."""
-    installed = list_installed_models()
-    lines = [f"❌ Модель '{model_name}' не найдена."]
-    if installed:
-        lines.append("   Установлены: " + ", ".join(installed))
-        lines.append("   Выбрать другую: задайте переменную окружения AGENT_MODEL")
-        lines.append('   PowerShell: $env:AGENT_MODEL = "имя_модели"')
-    lines.append(f"   Установить эту: ollama pull {model_name}")
-    return "\n".join(lines)
-
-
-def preload_model(model_name: str):
-    """
-    "Прогревает" модель: загружает её в память пустым запросом,
-    чтобы первый настоящий запрос был быстрым.
-    """
-    print(f"📦 Предзагрузка модели '{model_name}' в память...")
-    try:
-        response = requests.post(
-            f"{OLLAMA_BASE}/api/generate",
-            json={
-                "model": model_name,
-                "prompt": "",  # пустой промпт
-                "keep_alive": KEEP_ALIVE,
-                "options": {"num_predict": 1}  # генерировать почти ничего
-            },
-            timeout=120  # первая загрузка может быть долгой
-        )
-
-        if response.status_code == 200:
-            print(f"✅ Модель '{model_name}' готова к работе!")
-        else:
-            print(f"⚠️ Модель вернула статус {response.status_code}")
-    except requests.exceptions.Timeout:
-        print("⚠️ Предзагрузка заняла слишком много времени (модель большая).")
-        print("   Она продолжит загружаться при первом запросе.")
-    except Exception as e:
-        print(f"⚠️ Ошибка предзагрузки: {e}")
-
-
-# ====================================================================
-# Безопасный калькулятор и другие инструменты (как раньше)
-# ====================================================================
-
 ALLOWED_BIN_OPS = {
     ast.Add: operator.add,
     ast.Sub: operator.sub,
@@ -267,47 +45,31 @@ ALLOWED_UNARY_OPS = {
     ast.USub: operator.neg,
 }
 
-
 def _safe_eval_node(node):
-    """Считает одну ветку разобранного выражения.
-
-    Рекурсия по дереву разбора: число возвращаем как есть, операцию
-    выполняем, всё остальное отвергаем. Именно это «всё остальное»
-    и делает калькулятор безопасным.
-    """
+    """Безопасно вычисляет узел AST. Белый список операций защищает от RCE."""
     if isinstance(node, ast.Expression):
         return _safe_eval_node(node.body)
-
     if isinstance(node, ast.Constant):
         if isinstance(node.value, (int, float)):
             return node.value
         raise ValueError("Разрешены только числа")
-
     if isinstance(node, ast.BinOp):
         op_type = type(node.op)
         if op_type not in ALLOWED_BIN_OPS:
-            raise ValueError("Недопустимый оператор")
+            raise ValueError(f"Недопустимый оператор: {op_type.__name__}")
         left = _safe_eval_node(node.left)
         right = _safe_eval_node(node.right)
         return ALLOWED_BIN_OPS[op_type](left, right)
-
     if isinstance(node, ast.UnaryOp):
         op_type = type(node.op)
         if op_type not in ALLOWED_UNARY_OPS:
-            raise ValueError("Недопустимый унарный оператор")
+            raise ValueError(f"Недопустимый унарный оператор: {op_type.__name__}")
         operand = _safe_eval_node(node.operand)
         return ALLOWED_UNARY_OPS[op_type](operand)
-
-    raise ValueError("Недопустимое выражение")
-
+    raise ValueError(f"Недопустимое выражение: {type(node).__name__}")
 
 def calculator(expression: str) -> str:
-    """Считает арифметику без eval.
-
-    eval("__import__('os').system('rm -rf /')") выполнит что угодно,
-    поэтому выражение сначала разбирается в дерево, а потом обходится
-    вручную — с белым списком допустимых операций.
-    """
+    """Считает арифметику без eval. Белый список операций защищает от вредоносного кода."""
     try:
         tree = ast.parse(expression, mode="eval")
         result = _safe_eval_node(tree)
@@ -317,424 +79,256 @@ def calculator(expression: str) -> str:
     except Exception as e:
         return f"Ошибка калькулятора: {e}"
 
+def get_current_time() -> str:
+    """Возвращает текущие дату и время. Модель не имеет доступа к реальному времени."""
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-def list_directory(path: str = ".") -> str:
-    """Показывает содержимое папки. Вывод ограничен 200 записями,
-    чтобы огромный каталог не занял весь контекст модели."""
-    path = os.path.abspath(os.path.expanduser(path))
+TOOLS = {
+    "calculator": calculator,
+    "get_current_time": get_current_time,
+}
 
-    if not os.path.exists(path):
-        return f"Путь не найден: {path}"
+# ====================================================================
+# 3. SYSTEM PROMPT
+# ====================================================================
+tools_description = "\n".join([f"- {name}: {func.__doc__}" for name, func in TOOLS.items()])
 
-    if not os.path.isdir(path):
-        return f"Это не директория: {path}"
+SYSTEM_PROMPT = f"""Ты — автономный AI-агент-ассистент для разработчика.
+Твоя задача — решать задачи, используя рассуждения и доступные инструменты.
 
+Доступные инструменты:
+{tools_description}
+
+Формат вызова инструмента (строго один JSON-объект):
+{{"tool": "имя_инструмента", "args": {{"аргумент": "значение"}}}}
+
+Примеры взаимодействия:
+User: Посчитай (15 * 7) + 3
+Assistant: {{"tool": "calculator", "args": {{"expression": "(15 * 7) + 3"}}}}
+User: Результат инструмента: 108
+Assistant: Результат вычисления (15 * 7) + 3 равен 108.
+
+User: Который сейчас час?
+Assistant: {{"tool": "get_current_time", "args": {{}}}}
+User: Результат инструмента: 2026-08-23 14:30:00
+Assistant: Сейчас 14:30:00.
+
+User: Посчитай 10 / 0
+Assistant: {{"tool": "calculator", "args": {{"expression": "10 / 0"}}}}
+User: Результат инструмента: Ошибка: деление на ноль
+Assistant: Вычисление невозможно, так как деление на ноль математически недопустимо.
+
+Правила:
+1. Если нужен инструмент, ответь ТОЛЬКО валидным JSON. Не добавляй текст до или после JSON.
+2. Если инструмент вернул ошибку, проанализируй её и попробуй вызвать инструмент снова с исправленными аргументами.
+3. Никогда не выдумывай результаты работы инструментов.
+4. Когда у тебя есть вся необходимая информация, ответь обычным текстом (это финальный ответ пользователю).
+""".strip()
+
+# ====================================================================
+# 4. ЯДРО АГЕНТА
+# ====================================================================
+def is_ollama_running() -> bool:
     try:
-        entries = []
-        for name in sorted(os.listdir(path))[:200]:
-            full_path = os.path.join(path, name)
-            if os.path.isdir(full_path):
-                entries.append(f"[DIR]  {name}/")
-            else:
-                entries.append(f"[FILE] {name}")
+        response = requests.get(OLLAMA_BASE, timeout=3)
+        return response.status_code == 200
+    except requests.exceptions.RequestException:
+        return False
 
-        if not entries:
-            return "Директория пуста"
-        return "\n".join(entries)
-    except Exception as e:
-        return f"Ошибка чтения директории: {e}"
-
-
-def read_file(path: str, max_chars: int = 8000) -> str:
-    """Читает файл целиком или первые max_chars символов.
-
-    Обрезка обязательна: файл на мегабайт не поместится в контекст,
-    а Ollama обрежет его молча и с середины диалога.
-    """
-    path = os.path.abspath(os.path.expanduser(path))
-    if not os.path.exists(path):
-        return f"Файл не найден: {path}"
-    if not os.path.isfile(path):
-        return f"Это не файл: {path}"
+def ensure_ollama_running() -> bool:
+    """Гарантирует, что сервер Ollama запущен."""
+    if is_ollama_running():
+        return True
+    print("🚀 Запускаю сервер Ollama...")
     try:
-        with open(path, encoding="utf-8", errors="replace") as f:
-            content = f.read(max_chars + 1)
-        if len(content) > max_chars:
-            content = content[:max_chars] + "\n\n... [файл обрезан] ..."
-        return content
+        kwargs = {}
+        if sys.platform == "win32":
+            kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+            kwargs["stdout"] = subprocess.DEVNULL
+            kwargs["stderr"] = subprocess.DEVNULL
+        subprocess.Popen(["ollama", "serve"], **kwargs)
+        time.sleep(2)
+        return is_ollama_running()
     except Exception as e:
-        return f"Ошибка чтения файла: {e}"
+        print(f"❌ Не удалось запустить Ollama: {e}")
+        return False
 
-
-def search_in_file(path: str, query: str, max_results: int = 20) -> str:
-    """Ищет подстроку в файле, возвращая строки с их номерами.
-
-    Номера нужны модели, чтобы она могла сослаться на конкретное
-    место, а не пересказывать содержимое.
-    """
-    path = os.path.abspath(os.path.expanduser(path))
-    if not os.path.exists(path):
-        return f"Файл не найден: {path}"
-    if not os.path.isfile(path):
-        return f"Это не файл: {path}"
-    if not query:
-        return "Не указан текст для поиска"
+def preload_model():
+    """Прогревает модель, чтобы первый ответ был мгновенным."""
+    print(f"📦 Предзагрузка модели '{MODEL}' в память...")
     try:
-        results = []
-        query_lower = query.lower()
-        with open(path, encoding="utf-8", errors="replace") as f:
-            for line_number, line in enumerate(f, start=1):
-                if query_lower in line.lower():
-                    results.append(f"{line_number}: {line.rstrip()}")
-                    if len(results) >= max_results:
-                        results.append(f"... [показаны первые {max_results}] ...")
-                        break
-        if not results:
-            return f"Ничего не найдено: {query}"
-        return "\n".join(results)
-    except Exception as e:
-        return f"Ошибка поиска в файле: {e}"
+        requests.post(
+            f"{OLLAMA_BASE}/api/generate",
+            json={"model": MODEL, "prompt": "", "keep_alive": KEEP_ALIVE, "options": {"num_predict": 1}},
+            timeout=120
+        )
+        print("✅ Модель готова к работе!\n")
+    except Exception:
+        pass
 
-
-def normalize_arguments(arguments):
-    """Приводит аргументы вызова к словарю.
-
-    Модель может прислать словарь, строку с JSON внутри или просто
-    строку. Последний случай — догадка: подставляем значение
-    во все распространённые имена параметров и надеемся, что
-    инструмент возьмёт нужное.
-    """
-    if arguments is None:
-        return {}
-    if isinstance(arguments, dict):
-        return arguments
-    if isinstance(arguments, str):
-        try:
-            return json.loads(arguments)
-        except json.JSONDecodeError:
-            return {"expression": arguments, "path": arguments, "query": arguments}
-    return {}
-
-
-def execute_tool(name: str, args: dict) -> str:
-    """Диспетчер инструментов: имя из ответа модели -> вызов функции.
-
-    Цепочка if — самое простое, что работает, и самое неудобное,
-    что можно придумать: каждый новый инструмент правится в трёх
-    местах. В Главе 4 это заменяется реестром.
-
-    Ошибки возвращаются строкой, а не исключением: модель должна
-    их увидеть и попробовать иначе.
-    """
-    try:
-        if name == "calculator":
-            return calculator(args.get("expression", ""))
-        if name == "list_directory":
-            return list_directory(args.get("path", "."))
-        if name == "read_file":
-            return read_file(args.get("path", ""))
-        if name == "search_in_file":
-            return search_in_file(args.get("path", ""), args.get("query", ""))
-        return f"Неизвестный инструмент: {name}"
-    except Exception as e:
-        return f"Ошибка выполнения инструмента {name}: {e}"
-
-
-def normalize_potential_tool(obj):
-    """Проверяет, похож ли разобранный JSON на вызов инструмента.
-
-    Принимает две формы — {"name": ...} и {"function": {"name": ...}}:
-    разные модели пишут по-разному. Имя сверяется с KNOWN_TOOLS,
-    иначе любой словарь в тексте станет вызовом.
-    """
-    if not isinstance(obj, dict):
-        return None
-    name = obj.get("name")
-    if name in KNOWN_TOOLS:
-        return {"name": name, "arguments": obj.get("arguments", {})}
-    function_obj = obj.get("function")
-    if isinstance(function_obj, dict):
-        name = function_obj.get("name")
-        if name in KNOWN_TOOLS:
-            return {"name": name, "arguments": function_obj.get("arguments", {})}
-    return None
-
-
-def extract_unknown_tool_names(text: str) -> list:
-    """Ищет в ответе вызовы инструментов, которых у агента нет.
-
-    Модель регулярно придумывает несуществующие имена. Такой JSON не проходит
-    фильтр KNOWN_TOOLS, агент считает его обычным текстом — и пользователь
-    получает в ответ сырой JSON вместо объяснения. Находим эти вызовы, чтобы
-    вернуть модели внятную ошибку и дать ей исправиться.
-    """
-    names = []
-
-    def collect(obj):
-        if not isinstance(obj, dict):
-            return
-        for candidate in (obj, obj.get("function")):
-            if isinstance(candidate, dict):
-                name = candidate.get("name")
-                if isinstance(name, str) and name and name not in KNOWN_TOOLS:
-                    if "arguments" in candidate or "parameters" in candidate:
-                        names.append(name)
-
+def extract_json_from_text(text: str) -> dict | None:
+    """Извлекает JSON из текста модели."""
     for block in re.findall(r"```(?:json)?\s*(.*?)\s*```", text, re.DOTALL):
         try:
-            collect(json.loads(block))
-        except Exception:
-            pass
-
-    decoder = json.JSONDecoder()
-    pos = 0
-    while pos < len(text):
-        start = text.find("{", pos)
-        if start == -1:
-            break
-        try:
-            obj, end = decoder.raw_decode(text, start)
-            collect(obj)
-            pos = end
+            parsed = json.loads(block)
+            if isinstance(parsed, dict) and "tool" in parsed:
+                return parsed
         except json.JSONDecodeError:
-            pos = start + 1
+            pass
+    
+    start = text.find("{")
+    if start != -1:
+        end = text.rfind("}")
+        if end != -1:
+            json_str = text[start:end + 1]
+            try:
+                parsed = json.loads(json_str)
+                if isinstance(parsed, dict) and "tool" in parsed:
+                    return parsed
+            except json.JSONDecodeError:
+                pass
+    return None
 
-    # Порядок сохраняем, дубли убираем
-    return list(dict.fromkeys(names))
-
-
-def extract_tool_calls(text: str):
-    """Вытаскивает вызовы инструментов из текста ответа модели.
-
-    Самая неопрятная функция главы, и это не случайно: формат ответа
-    держится на договорённости из SYSTEM_PROMPT, а соблюдать её модель
-    не обязана. Отсюда три попытки по очереди:
-
-    1. JSON внутри блока ```json — модели любят его добавлять,
-       хотя промпт просил «ТОЛЬКО JSON»;
-    2. любая фигурная скобка в тексте — на случай «Сейчас посчитаю: {...}»;
-    3. та же скобка, но с удвоенными обратными слэшами: путь Windows
-       внутри JSON ломает разбор, и это чинится на месте.
-
-    Вызовом считается только объект, чьё имя есть в KNOWN_TOOLS,
-    иначе обычный словарь в тексте станет командой.
-
-    Возвращает список: модель может попросить несколько вызовов сразу.
-    """
-    calls = []
-    code_blocks = re.findall(r"```(?:json)?\s*(.*?)\s*```", text, re.DOTALL)
-    for block in code_blocks:
+def extract_unknown_tool_names(text: str) -> list:
+    """Ищет в ответе вызовы инструментов, которых у агента нет."""
+    names = []
+    for block in re.findall(r"```(?:json)?\s*(.*?)\s*```", text, re.DOTALL):
         try:
             obj = json.loads(block)
-            tool_call = normalize_potential_tool(obj)
-            if tool_call:
-                calls.append(tool_call)
-        except Exception:
-            pass
-    if calls:
-        return calls
-
-    decoder = json.JSONDecoder()
-    pos = 0
-    while pos < len(text):
-        start = text.find("{", pos)
-        if start == -1:
-            break
-        try:
-            obj, end = decoder.raw_decode(text, start)
-            tool_call = normalize_potential_tool(obj)
-            if tool_call:
-                calls.append(tool_call)
-            pos = end
+            if isinstance(obj, dict) and "tool" in obj and obj["tool"] not in TOOLS:
+                names.append(obj["tool"])
         except json.JSONDecodeError:
-            # Fallback: пробуем починить неэкранированные обратные слэши (Windows пути)
+            pass
+    
+    start = text.find("{")
+    if start != -1:
+        end = text.rfind("}")
+        if end != -1:
             try:
-                sub_text = text[start:]
-                # Заменяем одинарные слэши на двойные
-                fixed_sub = sub_text.replace('\\', '\\\\')
-                obj, end = decoder.raw_decode(fixed_sub, 0)
-                tc = normalize_potential_tool(obj)
-                if tc:
-                    calls.append(tc)
-                pos = start + end
-            except Exception:
-                pos = start + 1
-    return calls
+                obj = json.loads(text[start:end + 1])
+                if isinstance(obj, dict) and "tool" in obj and obj["tool"] not in TOOLS:
+                    names.append(obj["tool"])
+            except json.JSONDecodeError:
+                pass
+    return list(dict.fromkeys(names))
 
+def execute_tool(tool_name: str, args: dict) -> str:
+    """Выполняет инструмент и обрабатывает ВСЕ возможные ошибки."""
+    if tool_name not in TOOLS:
+        available = ", ".join(TOOLS.keys())
+        return f"Ошибка: инструмент '{tool_name}' не найден. Доступные: {available}."
+    
+    func = TOOLS[tool_name]
+    try:
+        return str(func(**args))
+    except TypeError as e:
+        sig = inspect.signature(func)
+        return f"Ошибка аргументов: {str(e)}. Ожидаемая сигнатура: {sig}"
+    except Exception as e:
+        return f"Ошибка выполнения инструмента '{tool_name}': {str(e)}"
 
-def request_model(messages: list) -> dict:
-    """Один запрос к модели. Возвращает message из ответа Ollama.
-
-    temperature=0.1 — агенту нужна предсказуемость, а не фантазия.
-    keep_alive удерживает модель в памяти между запросами, иначе
-    каждый вопрос начинался бы с загрузки нескольких гигабайт.
-    """
+def request_model(messages: list) -> str:
+    """Отправляет запрос к Ollama API и возвращает текст ответа."""
     payload = {
         "model": MODEL,
         "messages": messages,
         "stream": False,
-        "keep_alive": KEEP_ALIVE,  # удерживаем модель в памяти!
-        "options": {
-            "temperature": 0.1,
-            "num_ctx": NUM_CTX    # ← было 65536, стало 4096
-        }
+        "keep_alive": KEEP_ALIVE,
+        "options": {"temperature": 0.1, "num_ctx": NUM_CTX}
     }
-    response = requests.post(OLLAMA_URL, json=payload, timeout=300)
+    response = requests.post(OLLAMA_URL, json=payload, timeout=120)
     response.raise_for_status()
-    data = response.json()
-    message = data.get("message", {})
-    if "content" not in message:
-        message["content"] = ""
-    return message
+    return response.json()["message"]["content"].strip()
 
-
-def ask_agent(user_task: str) -> str:
-    """Цикл ReAct: спросить модель, выполнить, вернуть результат, повторить.
-
-    Здесь вся суть агента, разобранная в разделе 1.3 README:
-
-        собрать messages -> запросить модель -> есть в ответе вызов?
-            да  -> выполнить инструмент, дописать Observation, по кругу
-            нет -> это финальный ответ пользователю
-
-    Цикл ограничен MAX_ITERATIONS: без предохранителя модель, попавшая
-    в петлю, будет вызывать один и тот же инструмент бесконечно.
-
-    Отдельно обрабатывается случай, когда модель попросила инструмент,
-    которого нет: раньше такой JSON уходил пользователю как ответ,
-    теперь модель получает список доступных и ещё одну попытку.
-    """
+def ask_agent(user_query: str) -> str:
+    """Главный ReAct цикл агента."""
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": user_task}
+        {"role": "user", "content": user_query}
     ]
+
+    if VERBOSE:
+        print(f"\n👤 Запрос: {user_query}")
+        print("-" * 50)
 
     for iteration in range(1, MAX_ITERATIONS + 1):
         if VERBOSE:
-            print(f"\n--- Итерация {iteration} ---")
-
-        assistant_message = request_model(messages)
-        content = assistant_message.get("content", "")
-
+            print(f"\n[Итерация {iteration}/{MAX_ITERATIONS}]")
+        
+        response_text = request_model(messages)
+        
         if VERBOSE:
-            print("[Model raw answer]")
-            print(content[:500])
+            print(f"🤖 Ответ модели:\n{response_text}")
 
-        tool_calls = extract_tool_calls(content)
-
-        if not tool_calls:
-            # Модель могла вызвать несуществующий инструмент. Отдавать такой
-            # JSON пользователю бессмысленно — возвращаем ошибку модели.
-            unknown = extract_unknown_tool_names(content)
-            if unknown:
-                if VERBOSE:
-                    print(f"[Agent] Неизвестные инструменты: {', '.join(unknown)}")
-                messages.append({"role": "assistant", "content": content})
-                messages.append({
-                    "role": "user",
-                    "content": (
-                        f"Инструмента {unknown[0]} не существует. "
-                        f"Доступные инструменты: {', '.join(sorted(KNOWN_TOOLS))}. "
-                        "Вызови подходящий из списка или ответь пользователю обычным текстом."
-                    )
-                })
-                continue
-            return content.strip()
-
-        messages.append({"role": "assistant", "content": content})
-
-        for tool_call in tool_calls:
-            tool_name = tool_call.get("name", "")
-            tool_args = normalize_arguments(tool_call.get("arguments", {}))
-
+        unknown_tools = extract_unknown_tool_names(response_text)
+        if unknown_tools:
             if VERBOSE:
-                print(f"[Agent] Вызываю инструмент: {tool_name}")
-                print(f"[Agent] Аргументы: {tool_args}")
-
-            tool_result = execute_tool(tool_name, tool_args)
-
-            if VERBOSE:
-                preview = tool_result[:300].replace("\n", " ")
-                print(f"[Tool] Результат: {preview}")
-
+                print(f"⚠️ Модель попыталась вызвать несуществующий инструмент: {unknown_tools[0]}")
+            messages.append({"role": "assistant", "content": response_text})
             messages.append({
                 "role": "user",
-                "content": f"Observation from {tool_name}: {tool_result}"
+                "content": f"Ошибка: инструмент '{unknown_tools[0]}' не существует. Доступные инструменты: {', '.join(TOOLS.keys())}. Попробуй снова."
             })
+            continue
 
-    return "Агент достиг лимита итераций и не смог завершить задачу."
+        parsed = extract_json_from_text(response_text)
+        
+        if parsed and isinstance(parsed, dict) and "tool" in parsed:
+            tool_name = parsed["tool"]
+            args = parsed.get("args", {})
+            
+            if VERBOSE:
+                print(f"⚙️ Вызов инструмента: {tool_name} с аргументами {args}")
+            
+            observation = execute_tool(tool_name, args)
+            
+            if VERBOSE:
+                print(f"👁️ Наблюдение (результат): {observation}")
+            
+            messages.append({"role": "assistant", "content": response_text})
+            messages.append({"role": "user", "content": f"Результат инструмента: {observation}"})
+            continue
+        else:
+            return response_text
+
+    return "⚠️ Превышен лимит итераций. Агент не смог завершить задачу."
 
 # ====================================================================
-# ГЛАВНАЯ ФУНКЦИЯ С АВТОЗАПУСКОМ
+# 5. REPL (Интерактивный режим)
 # ====================================================================
-
 def main():
-    """Точка входа: подготовка окружения и цикл вопросов.
-
-    Порядок важен. Сначала поднимаем Ollama, потом проверяем, что модель
-    установлена, потом прогреваем её — и только затем спрашиваем
-    пользователя. Иначе первый же вопрос упрётся в минутную паузу
-    на загрузку модели, и будет непонятно, завис агент или работает.
-    """
     if not ensure_ollama_running():
         print("\n❌ Не удалось запустить Ollama. Завершение работы.")
         return
 
-    print(f"\n🔍 Проверяю модель '{MODEL}'...")
-    if not model_exists(MODEL):
-        print(model_not_found_message(MODEL))
-        return
-    print("✅ Модель готова.")
+    preload_model()
 
-    preload_model(MODEL)
-
-    if VERBOSE:
-        print("\n" + "=" * 60)
-        print(f"🧠 Модель: {MODEL}")
-        print(f"💾 Keep alive: {KEEP_ALIVE}")
-        print(f"🔊 Режим: подробный (VERBOSE={VERBOSE})")
-        print("🛑 exit / quit / выход — для выхода.")
-        print("=" * 60 + "\n")
-    else:
-        print(f"🤖 Агент готов. Модель: {MODEL}")
-        print("🛑 exit / quit / выход — для выхода.\n")
+    print(f"🚀 Агент запущен (Модель: {MODEL}, Макс. итераций: {MAX_ITERATIONS})")
+    print("Введите 'выход' или 'exit' для завершения.\n")
 
     while True:
         try:
-            user_input = input("Вы > ").strip()
-
-            if not user_input:
+            query = input("Вы > ").strip()
+            if not query:
                 continue
-
-            if user_input.lower() in {"exit", "quit", "выход"}:
+            if query.lower() in ["выход", "exit", "quit"]:
                 print("👋 Пока!")
                 break
-
-            # В чистом режиме показываем индикатор работы
+            
             if not VERBOSE:
                 print("⏳ Думаю...")
-
-            answer = ask_agent(user_input)
-
-            # Чистый вывод: только финальный ответ
-            print("\n🤖 Агент >")
-            print(answer)
-            print()
-
+                
+            answer = ask_agent(query)
+            
+            print("\n" + "=" * 50)
+            print(f"✅ Финальный ответ:\n{answer}")
+            print("=" * 50 + "\n")
+            
         except KeyboardInterrupt:
-            print("\n⚠️ Остановлено.")
+            print("\n\n👋 Завершение работы.")
             break
-
         except requests.exceptions.ConnectionError:
-            print("\n⚠️ Связь потеряна. Восстанавливаю...")
-            if ensure_ollama_running():
-                print("✅ Восстановлено. Повтори запрос.")
-            else:
-                print("❌ Не удалось восстановить.")
-                break
-
-        except Exception as e:
-            print(f"\nОшибка: {e}")
+            print("\n⚠️ Связь с Ollama потеряна. Попробуйте снова.")
 
 if __name__ == "__main__":
     main()
