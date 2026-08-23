@@ -315,41 +315,6 @@ python -m chapter8.test_formats
 
 ## 🗂️ Как устроен репозиторий
 
-```mermaid
-graph TD
-    Root["firstAgent/"]
-    Root --> Ch1["chapter1/<br/>Базовый агент: ReAct-цикл, 4 инструмента, автозапуск Ollama"]
-    Ch1 --> Ch1a["agent.py ← ядро, которое переиспользуют все следующие главы"]
-    Root --> Ch2["chapter2/"]
-    Ch2 --> Ch2a["paraphraser.py — Второй агент перед первым: чистит запрос пользователя"]
-    Root --> Ch3["chapter3/"]
-    Ch3 --> Ch3a["agent.py — Свой цикл с историей диалога между запросами"]
-    Root --> Ch4["chapter4/"]
-    Ch4 --> Ch4a["agent.py — Подключение реестра к ядру Главы 1"]
-    Ch4 --> Ch4b["src/tools.py ← реестр плагинов: @tool, 9 инструментов"]
-    Root --> Ch5["chapter5/"]
-    Ch5 --> Ch5a["agent.py — Агент с долгосрочной памятью"]
-    Ch5 --> Ch5b["src/ — embeddings.py, vectorstore.py, tools.py"]
-    Root --> Ch6["chapter6/"]
-    Ch6 --> Ch6a["agent.py — Агент с RAG по коду проекта"]
-    Ch6 --> Ch6b["src/ — indexer.py, tools.py"]
-    Ch6 --> Ch6c["test_search.py — Диагностика поиска без участия модели"]
-    Root --> Ch7["chapter7/"]
-    Ch7 --> Ch7a["agent.py — Агент с гибридным поиском"]
-    Ch7 --> Ch7b["src/ — bm25.py, indexer.py, tools.py"]
-    Ch7 --> Ch7c["test_hybrid.py — Замер: векторы против ключевых слов против гибрида"]
-    Root --> Ch8["chapter8/"]
-    Ch8 --> Ch8a["agent.py — Агент, определяющий формат вызовов при старте"]
-    Ch8 --> Ch8b["src/ — schema.py, probe.py, native.py"]
-    Ch8 --> Ch8c["test_formats.py — Какие модели отдают нативные tool_calls"]
-    Root --> GH[".github/workflows/ — Автоматические проверки при каждом push"]
-    Root --> CI["ci_smoke.py — Проверки кода, которым не нужна Ollama"]
-    Root --> Ruff["ruff.toml — Настройки линтера"]
-    Root --> Readme["README.md — Этот файл: весь текст курса"]
-    Root --> Roadmap["ROADMAP.md — План следующих глав и список долгов"]
-    Root --> Req["requirements.txt"]
-```
-
 В каждой папке главы лежит свой `README.md` с подробностями — корневой файл
 даёт сжатую версию.
 
