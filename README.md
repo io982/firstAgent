@@ -315,7 +315,7 @@ python -m chapter8.test_formats
 
 ## 🗂️ Как устроен репозиторий
 
-```text
+```mermaid
 graph TD
     Root["firstAgent/"]
     Root --> Ch1["chapter1/<br/>Базовый агент: ReAct-цикл, 4 инструмента, автозапуск Ollama"]
@@ -374,7 +374,7 @@ base.execute_tool = tools.execute_tool      # другой диспетчер
 что лежит в глобалях модуля `chapter1.agent` **сейчас** — то есть уже
 подменённую версию.
 
-```text
+```mermaid
 graph TD
     Base["chapter1.agent<br/>← ядро: ask_agent, request_model, парсер JSON"]
     Base -->|подменяют глобали| Ch4["chapter4<br/>KNOWN_TOOLS, SYSTEM_PROMPT, execute_tool → реестр плагинов"]
@@ -781,7 +781,7 @@ Context = System prompt + History + Tools + Documents + User message + Tool resu
 
 Одна базовая (base) модель может иметь множество производных — **файн-тюнов**. Это создаёт целое «семейство» моделей с разным поведением.
 
-```text
+```mermaid
 graph TD
     Base["Base model<br/>(например, Llama-3-8B)"]
     Base --> General["General fine-tune<br/>→ улучшение общих диалоговых навыков"]
