@@ -1142,11 +1142,12 @@ graph TD
     Decision -- Нет --> FinalAnswer([✅ Финальный ответ])
     MaxIter[⏱️ Лимит итераций] -.-> FinalAnswer
     
-    classDef defaultStyle fill:#f9f9f9,stroke:#333,stroke-width:5px;
-    classDef decisionStyle fill:#f9f9f9,stroke:#333,stroke-width:2px;
-    classDef actionStyle fill:#f9f9f9,stroke:#333,stroke-width:2px;
-    classDef finishStyle fill:#f9f9f9,stroke:#333,stroke-width:2px;
+    classDef defaultStyle fill:#f9f9f9,stroke:#333,stroke-width:1px,color:#333333;
+    classDef decisionStyle fill:#fff2cc,stroke:#d6b656,stroke-width:2px,color:#333333;
+    classDef actionStyle fill:#d5e8d4,stroke:#82b366,stroke-width:2px,color:#004d00;
+    classDef finishStyle fill:#f8cecc,stroke:#b85450,stroke-width:2px,color:#660000;
     
+    class Start,Reason defaultStyle;
     class Decision decisionStyle;
     class Act,Observe,History actionStyle;
     class FinalAnswer,MaxIter finishStyle;
