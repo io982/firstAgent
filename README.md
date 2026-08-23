@@ -1143,9 +1143,9 @@ graph TD
     MaxIter[⏱️ Лимит итераций] -.-> FinalAnswer
     
     classDef defaultStyle fill:#f9f9f9,stroke:#333,stroke-width:5px;
-    classDef decisionStyle fill:#fff2cc,stroke:#333,stroke-width:2px;
-    classDef actionStyle fill:#d5e8d4,stroke:#333,stroke-width:2px;
-    classDef finishStyle fill:#f8cecc,stroke:#333,stroke-width:2px;
+    classDef decisionStyle fill:#f9f9f9,stroke:#333,stroke-width:2px;
+    classDef actionStyle fill:#f9f9f9,stroke:#333,stroke-width:2px;
+    classDef finishStyle fill:#f9f9f9,stroke:#333,stroke-width:2px;
     
     class Decision decisionStyle;
     class Act,Observe,History actionStyle;
