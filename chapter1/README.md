@@ -11,11 +11,11 @@
 ## Запуск
 
 ```bash
-# 1. Быстрые тесты (без модели) — проверяют компоненты
-python -m chapter1.test_agent
+# 1. Быстрые тесты (без модели) — запускаются по умолчанию, проверяют логику за доли секунды
+python -m pytest chapter1/test_agent.py -v
 
-# 2. Полные тесты (с моделью) — проверяют интеграцию
-python -m chapter1.test_agent --full
+# 2. Интеграционные тесты (с моделью) — явный запуск полного цикла ReAct
+python -m pytest chapter1/test_agent.py -v -m integration
 
 # 3. Запуск интерактивного агента из корня проекта:
 python -m chapter1.agent

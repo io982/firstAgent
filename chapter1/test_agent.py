@@ -1,232 +1,95 @@
 """
 Тесты для Главы 1: Базовый агент с ReAct-паттерном.
+Используется профессиональный фреймворк pytest.
 
 Запуск:
-    python -m chapter1.test_agent              # Быстрые тесты (без модели)
-    python -m chapter1.test_agent --full       # Все тесты (с моделью)
+    python -m pytest chapter1/test_agent.py -v                 # Быстрые тесты (без модели)
+    python -m pytest chapter1/test_agent.py -v -m integration  # Интеграционные тесты (с моделью)
 """
+import pytest
 
-import io
-import sys
-
-# Устанавливаем UTF-8 для консоли Windows
-if sys.platform == "win32":
-    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
-
-# Импортируем компоненты агента
 from chapter1.agent import TOOLS, calculator, execute_tool, extract_json_from_text
 
 
 # ====================================================================
-# Утилиты для тестирования
+# 1. Тесты калькулятора (Параметризованные)
 # ====================================================================
-class TestLogger:
-    """Простой логгер для тестов."""
-    def __init__(self):
-        self.passed = 0
-        self.failed = 0
-        self.skipped = 0
-        self.logs = []
+@pytest.mark.parametrize("expression, expected", [
+    ("5256+665", "5921"),
+    ("100-37", "63"),
+    ("15*7", "105"),
+    ("10/4", "2.5"),
+    ("(15*7)+3", "108"),
+    ("2**10", "1024"),
+    ("10//3", "3"),
+    ("10%3", "1"),
+    ("-5+10", "5"),
+    ("+5+10", "15"),
+])
+def test_calculator_basic(expression, expected):
+    """Проверяет базовые арифметические операции."""
+    assert calculator(expression) == expected
 
-    def test(self, name: str, condition: bool, details: str = ""):
-        """Записывает результат теста."""
-        if condition:
-            self.passed += 1
-            status = "✅ PASS"
-        else:
-            self.failed += 1
-            status = "❌ FAIL"
-
-        log_entry = f"{status}: {name}"
-        if details and not condition:
-            log_entry += f"\n   └─ {details}"
-
-        self.logs.append(log_entry)
-        print(log_entry)
-
-    def skip(self, name: str, reason: str):
-        """Пропускает тест."""
-        self.skipped += 1
-        log_entry = f"⚠️ SKIP: {name}\n   └─ {reason}"
-        self.logs.append(log_entry)
-        print(log_entry)
-
-    def summary(self):
-        """Выводит итоговую статистику."""
-        total = self.passed + self.failed + self.skipped
-        print("\n" + "=" * 60)
-        print(f"📊 Итого: {total} тестов")
-        print(f"   ✅ Пройдено: {self.passed}")
-        print(f"   ❌ Провалено: {self.failed}")
-        print(f"   ⚠️ Пропущено: {self.skipped}")
-        print("=" * 60)
-
-        if self.failed > 0:
-            print("\n❌ ТЕСТЫ ПРОВАЛЕНЫ")
-            return 1
-        else:
-            print("\n✅ ВСЕ ТЕСТЫ ПРОЙДЕНЫ")
-            return 0
-
-logger = TestLogger()
-
-# ====================================================================
-# 1. Тесты калькулятора
-# ====================================================================
-def test_calculator():
-    print("\n🧮 Тесты калькулятора")
-    print("-" * 60)
-
-    # Базовые операции
-    logger.test("Сложение: 5256+665", calculator("5256+665") == "5921")
-    logger.test("Вычитание: 100-37", calculator("100-37") == "63")
-    logger.test("Умножение: 15*7", calculator("15*7") == "105")
-    logger.test("Деление: 10/4", calculator("10/4") == "2.5")
-
-    # Сложные выражения
-    logger.test("Скобки: (15*7)+3", calculator("(15*7)+3") == "108")
-    logger.test("Степень: 2**10", calculator("2**10") == "1024")
-    logger.test("Целочисленное деление: 10//3", calculator("10//3") == "3")
-    logger.test("Остаток: 10%3", calculator("10%3") == "1")
-
-    # Унарные операции
-    logger.test("Отрицание: -5+10", calculator("-5+10") == "5")
-    logger.test("Плюс: +5+10", calculator("+5+10") == "15")
-
-    # Ошибки
-    result = calculator("10/0")
-    logger.test("Деление на ноль (ошибка)", "Ошибка" in result, result)
-
-    result = calculator("import os")
-    logger.test("Запрещённая операция (ошибка)", "Ошибка" in result or "Неподдерживаемый" in result, result)
-
-    result = calculator("not a number")
-    logger.test("Невалидное выражение (ошибка)", "Ошибка" in result, result)
-
+def test_calculator_errors():
+    """Проверяет безопасную обработку ошибок в калькуляторе."""
+    assert "Ошибка" in calculator("10/0")
+    assert "Ошибка" in calculator("import os")
+    assert "Ошибка" in calculator("not a number")
+    assert "Ошибка" in calculator("5 & 3")  # Запрещенный оператор
 
 # ====================================================================
 # 2. Тесты парсинга JSON
 # ====================================================================
-def test_json_parsing():
-    print("\n🔍 Тесты парсинга JSON")
-    print("-" * 60)
+def test_extract_json_valid():
+    """Чистый валидный JSON."""
+    result = extract_json_from_text('{"tool": "calculator", "args": {"expression": "5+5"}}')
+    assert result is not None and result["tool"] == "calculator"
 
-    # Валидный JSON
-    text = '{"tool": "calculator", "args": {"expression": "5+5"}}'
-    result = extract_json_from_text(text)
-    logger.test("Чистый JSON", result is not None and result["tool"] == "calculator")
-
-    # JSON с текстом вокруг
+def test_extract_json_with_text():
+    """JSON с поясняющим текстом вокруг (частая ситуация с LLM)."""
     text = 'Вот мой ответ: {"tool": "calculator", "args": {"expression": "5+5"}} готово!'
     result = extract_json_from_text(text)
-    logger.test("JSON с текстом вокруг", result is not None and result["tool"] == "calculator")
+    assert result is not None and result["tool"] == "calculator"
 
-    # JSON с переносами строк
-    text = '''
-    Думаю, нужно вызвать инструмент.
-    {"tool": "calculator", "args": {"expression": "5+5"}}
-    '''
-    result = extract_json_from_text(text)
-    logger.test("JSON с переносами строк", result is not None and result["tool"] == "calculator")
-
-    # Невалидный JSON
-    text = '{"tool": "calculator", "args": {"expression": "5+5"'
-    result = extract_json_from_text(text)
-    logger.test("Сломанный JSON (None)", result is None)
-
-    # Текст без JSON
-    text = "Это просто текстовый ответ без вызова инструмента."
-    result = extract_json_from_text(text)
-    logger.test("Текст без JSON (None)", result is None)
-
-    # JSON без ключа "tool"
-    text = '{"name": "calculator", "args": {"expression": "5+5"}}'
-    result = extract_json_from_text(text)
-    logger.test("JSON без ключа 'tool' (None)", result is None)
-
+def test_extract_json_invalid():
+    """Сломанный JSON или текст без JSON должен возвращать None."""
+    assert extract_json_from_text('{"tool": "calculator"') is None
+    assert extract_json_from_text("Просто текстовый ответ без вызова инструмента.") is None
+    assert extract_json_from_text('{"name": "calculator", "args": {}}') is None  # Нет ключа 'tool'
 
 # ====================================================================
-# 3. Тесты execute_tool
+# 3. Тесты execute_tool (Диспетчер инструментов)
 # ====================================================================
-def test_execute_tool():
-    print("\n⚙️ Тесты execute_tool")
-    print("-" * 60)
+def test_execute_tool_success():
+    assert execute_tool("calculator", {"expression": "5+5"}) == "10"
 
-    # Успешный вызов
-    result = execute_tool("calculator", {"expression": "5+5"})
-    logger.test("Успешный вызов calculator", result == "10")
-
+def test_execute_tool_errors():
     # Несуществующий инструмент
     result = execute_tool("nonexistent_tool", {})
-    logger.test("Несуществующий инструмент (ошибка)", "не найден" in result.lower(), result)
+    assert "не найден" in result.lower()
 
-    # Неверные аргументы (лишние)
+    # Неверные аргументы (галлюцинация модели)
     result = execute_tool("get_current_time", {"unexpected_arg": "value"})
-    logger.test("Лишние аргументы (ошибка)", "Ошибка" in result or "unexpected" in result.lower(), result)
+    assert "Ошибка" in result or "unexpected" in result.lower()
 
-    # Проверка, что все инструменты зарегистрированы
-    logger.test("calculator зарегистрирован", "calculator" in TOOLS)
-    logger.test("get_current_time зарегистрирован", "get_current_time" in TOOLS)
-
-
-# ====================================================================
-# 4. Интеграционные тесты (с моделью)
-# ====================================================================
-def test_integration():
-    print("\n🤖 Интеграционные тесты (с моделью)")
-    print("-" * 60)
-
-    try:
-        from chapter1.agent import ask_agent
-
-        # Тест 1: Простой запрос
-        print("\nТест: Простой запрос к модели...")
-        result = ask_agent("Посчитай 5+5")
-        logger.test("Модель вернула ответ", len(result) > 0 and "10" in result, result[:100])
-
-        # Тест 2: Запрос с инструментом
-        print("\nТест: Запрос с вызовом инструмента...")
-        result = ask_agent("Посчитай (15*7)+3")
-        logger.test("Модель использовала calculator", "108" in result, result[:100])
-
-        # Тест 3: Обработка ошибки
-        print("\nТест: Обработка ошибки деления на ноль...")
-        result = ask_agent("Посчитай 10/0")
-        # Ищем корни слов или ключевые понятия, чтобы не зависеть от падежей
-        is_error_handled = any(word in result.lower() for word in ["ошибк", "нельзя", "бесконеч", "недопустим", "деление"])
-        logger.test("Модель обработала ошибку", is_error_handled, result[:150])
-
-    except ImportError as e:
-        logger.skip("Интеграционные тесты", f"Не удалось импортировать ask_agent: {e}")
-    except Exception as e:
-        logger.skip("Интеграционные тесты", f"Ошибка при запуске: {e}")
-
+def test_tools_registered():
+    """Проверка, что инструменты корректно зарегистрированы в словаре."""
+    assert "calculator" in TOOLS
+    assert "get_current_time" in TOOLS
 
 # ====================================================================
-# Главная функция
+# 4. Интеграционные тесты (Требуют работающей Ollama)
 # ====================================================================
-def main():
-    print("=" * 60)
-    print("🧪 Тесты для Главы 1: Базовый агент с ReAct-паттерном")
-    print("=" * 60)
+@pytest.mark.integration
+def test_agent_integration():
+    """Тесты, проверяющие реальный цикл ReAct с моделью."""
+    from chapter1.agent import ask_agent
 
-    # Быстрые тесты (всегда запускаются)
-    test_calculator()
-    test_json_parsing()
-    test_execute_tool()
+    # Тест 1: Простой запрос
+    result = ask_agent("Посчитай 5+5")
+    assert "10" in result
 
-    # Интеграционные тесты (только с флагом --full)
-    if "--full" in sys.argv:
-        test_integration()
-    else:
-        print("\n⚠️ Интеграционные тесты пропущены.")
-        print("   Запустите с флагом --full для тестов с моделью:")
-        print("   python -m chapter1.test_agent --full")
-
-    # Итоговая статистика
-    exit_code = logger.summary()
-    sys.exit(exit_code)
-
-
-if __name__ == "__main__":
-    main()
+    # Тест 2: Обработка ошибки деления на ноль
+    result = ask_agent("Посчитай 10/0")
+    is_error_handled = any(word in result.lower() for word in ["ошибк", "нельзя", "бесконеч", "недопустим", "деление"])
+    assert is_error_handled, f"Модель не обработала ошибку. Ответ: {result[:150]}"

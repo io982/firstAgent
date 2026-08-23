@@ -369,8 +369,8 @@ graph TD
 ```bash
 pip install ruff
 
-ruff check .          # показать найденное
-ruff check . --fix    # починить то, что чинится автоматически
+python -m ruff check .          # показать найденное
+python -m ruff check . --fix    # починить то, что чинится автоматически
 ```
 
 Отдельно отключено правило `E501` (длина строки). В коде много системных
@@ -1159,11 +1159,11 @@ graph TD
 # Убедитесь, что Ollama запущена и модель скачана:
 # ollama pull qwen2.5:3b
 
-# 1. Быстрые тесты (без модели) — проверяют компоненты
-python -m chapter1.test_agent
+# 1. Быстрые тесты (без модели) — запускаются по умолчанию, проверяют логику за доли секунды
+python -m pytest chapter1/test_agent.py -v
 
-# 2. Полные тесты (с моделью) — проверяют интеграцию
-python -m chapter1.test_agent --full
+# 2. Интеграционные тесты (с моделью) — явный запуск полного цикла ReAct
+python -m pytest chapter1/test_agent.py -v -m integration
 
 # 3. Запуск интерактивного агента из корня проекта:
 python -m chapter1.agent
