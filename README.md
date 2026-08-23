@@ -1136,21 +1136,20 @@ graph TD
     
     Decision -- Да --> Act[⚙️ Act: Формирует JSON-вызов]
     Act --> Observe[👁️ Observe: Python выполняет код]
-    Observe --> History[📝 Добавляет результат в Message History]
+    Observe --> History[📝 Добавляет результат в History]
     History --> Reason
     
-    Decision -- Нет --> FinalAnswer([✅ Финальный текстовый ответ])
+    Decision -- Нет --> FinalAnswer([✅ Финальный ответ])
+    MaxIter[⏱️ Лимит итераций] -.-> FinalAnswer
     
-    MaxIter[⏱️ Превышен лимит итераций] -.-> FinalAnswer
+    classDef defaultStyle fill:#f9f9f9,stroke:#333,stroke-width:1px;
+    classDef decisionStyle fill:#fff2cc,stroke:#d6b656,stroke-width:2px;
+    classDef actionStyle fill:#d5e8d4,stroke:#82b366,stroke-width:2px;
+    classDef finishStyle fill:#f8cecc,stroke:#b85450,stroke-width:2px;
     
-    classDef default fill:#f9f9f9,stroke:#333,stroke-width:1px;
-    classDef decision fill:#fff2cc,stroke:#d6b656,stroke-width:2px;
-    classDef action fill:#d5e8d4,stroke:#82b366,stroke-width:2px;
-    classDef end fill:#f8cecc,stroke:#b85450,stroke-width:2px;
-    
-    class Decision decision;
-    class Act,Observe,History action;
-    class FinalAnswer,MaxIter end;
+    class Decision decisionStyle;
+    class Act,Observe,History actionStyle;
+    class FinalAnswer,MaxIter finishStyle;
 ```
 
 ## 🚀 Запуск и тестирование
