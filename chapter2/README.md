@@ -122,7 +122,7 @@ python -m chapter2.agent
 ```mermaid
 graph TD
     A[chapter1/agent.py] -->|Импортируем| B[chapter2/agent.py]
-    A -->|Импортируем| C[chapter2/test_tools.py]
+    A -->|Импортируем| C[chapter2/tests.py]
     
     subgraph "Что берем из Главы 1"
         A1[request_model]
