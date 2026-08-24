@@ -302,4 +302,4 @@ python -m chapter1.agent
 3. *"Посчитай 10 / 0"* (проверка обработки Tool Error)
 4. *"Вызови инструмент несуществующий_инструмент"* (проверка Invalid Action и галлюцинаций)
 
-|-| [📚 Оглавление](README.md) | [Далее](chapter1/README.md) |
+|[Назад](chapter0/README.md) | [📚 Оглавление](README.md) | [Далее]"""(chapter2/README.md)""" |
