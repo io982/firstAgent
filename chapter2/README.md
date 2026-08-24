@@ -121,16 +121,17 @@ python -m chapter2.agent
 
 ```mermaid
 graph TD
-    A["chapter1/agent.py"] -->|Импортируем| B["chapter2/agent.py"]
-    A -->|Импортируем| C["chapter2/tests.py"]
+    A["chapter1/agent.py"] -->|Импортируем| GL1
     
-    subgraph "Что берем из Главы 1"
+    subgraph GL1["Что берем из Главы 1"]
         A1["request_model"]
         A2["ensure_ollama_running"]
         A3["preload_model"]
     end
     
-    subgraph "Что создаем в Главе 2"
+    GL1 -->|Импортируем| GL2
+    
+    subgraph GL2["Что создаем в Главе 2"]
         B1["@tool декоратор"]
         B2["TOOL_REGISTRY"]
         B3["execute_tool — новый диспетчер"]
@@ -138,14 +139,8 @@ graph TD
         B5["Новый SYSTEM_PROMPT"]
     end
     
-    A1 --> B
-    A2 --> B
-    A3 --> B
-    B1 --> B
-    B2 --> B
-    B3 --> B
-    B4 --> B
-    B5 --> B
+    GL2 --> B["chapter2/agent.py"]
+    B --> C["chapter2/tests.py"]
 ```
 
 |[Назад](../chapter1/README.md) | [📚 Оглавление](../README.md) | [Далее](../chapter3/README.md)|
