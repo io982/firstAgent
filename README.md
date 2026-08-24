@@ -27,9 +27,9 @@
 
 | Глава | Тема | Код |
 | --- | --- | --- |
-| [Введение](#-введение) | требования, установка с нуля, быстрый старт, предупреждения, устройство репозитория | — |
 | [Глава 0](chapter0/README.md) | Выбор модели: типы, параметры, квантизация, железо | — |
 | [Глава 1](chapter1/README.md) | Базовый агент с ReAct-паттерном | [chapter1/agent.py](chapter1/agent.py) |
+| [Глава 2](chapter2/README.md) | Архитектура Tool API: от хардкода к JSON Schema | [chapter2/agent.py](chapter1/agent.py) |
 
 
 ## 🎯 Чему вы научитесь
@@ -46,7 +46,6 @@
 - ✅ Измерять качество поиска числом, а не ощущением
 - ✅ Работать с нативным function calling и понимать его границы
 
-## 🛠️ Введение
 
 ## 🛠️ Требования
 
@@ -248,33 +247,9 @@ pip install -r requirements.txt
 # Глава 1 — запускать из корня проекта
 python -m chapter1.agent
 
-# Глава 2 (мульти-агент)
-python -m chapter2.paraphraser
+# Глава 2 — запускать из корня проекта
+python -m chapter2.agent
 
-# Глава 3 (память между запросами)
-python -m chapter3.agent
-
-# Глава 4 (плагины)
-python -m chapter4.agent
-
-# Глава 5 (долгосрочная память) — нужна модель эмбеддингов
-ollama pull nomic-embed-text
-python -m chapter5.agent
-
-# Глава 6 (RAG по коду проекта)
-python -m chapter6.agent
-
-# Глава 7 (гибридный поиск: векторы + ключевые слова)
-python -m chapter7.agent
-
-# Замер качества поиска: векторы против гибрида
-python -m chapter7.test_hybrid
-
-# Глава 8 (нативные tool_calls, формат определяется автоматически)
-python -m chapter8.agent
-
-# Какие модели отдают нативные вызовы, а какие нет
-python -m chapter8.test_formats
 ```
 
 ## ⚠️ !!!ВНИМАНИЕ!!! 

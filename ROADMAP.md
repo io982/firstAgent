@@ -14,57 +14,7 @@
 
 # Глава 2. Tool Calling
 
-**Статус: CORE**
-
-Переходим от имитации инструментов к нормальному tool calling.
-
-## 2.1. Function calling
-
-* Tool schema
-* Arguments
-* Tool result
-* Native tool calls
-
-## 2.2. Создание Tool API
-
-* Python functions
-* JSON Schema
-* Validation
-* Structured output
-
-## 2.3. Реальные tools
-
-* Filesystem
-* HTTP
-* Python
-* Git
-* Database
-
-## 2.4. Tool orchestration
-
-* Несколько tools
-* Tool selection
-* Tool chaining
-* Parallel tools
-
-## 2.5. Безопасность
-
-* Permissions
-* Allowlist
-* Timeout
-* Ограничение команд
-
-### Практический результат
-
-```
-Agent
-  │
-  ├── calculator
-  ├── filesystem
-  ├── HTTP
-  ├── Python
-  └── database
-```
+**Статус: ✅ ГОТОВО** — [текст](chapter2/README.md)
 
 ---
 

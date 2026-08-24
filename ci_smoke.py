@@ -10,6 +10,7 @@ print("=" * 60)
 # Список глав с тестами
 chapters = [
     "chapter1/test_agent.py",
+    "chapter2/tests.py",
     # Добавь сюда главы по мере написания:
     # "chapter2/test_paraphraser.py",
     # "chapter3/test_agent.py",
