@@ -1,9 +1,17 @@
+import ast
 import inspect
 import json
 import os
 import re
+import sys
 from collections.abc import Callable
 from typing import Any
+
+sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+
+# Переиспользуем безопасный AST-калькулятор из Главы 1 вместо eval:
+# eval с пустым __builtins__ обходится через (1).__class__.__base__.__subclasses__().
+from chapter1.agent import _safe_eval_node
 
 # Глобальный реестр инструментов
 TOOL_REGISTRY: dict[str, dict[str, Any]] = {}
@@ -46,8 +54,10 @@ def tool(func: Callable) -> Callable:
 def calculator(expression: str) -> str:
     """Безопасно вычисляет результат простого математического выражения."""
     try:
-        safe_dict = {"__builtins__": {}}
-        return str(eval(expression, safe_dict, {}))
+        tree = ast.parse(expression, mode="eval")
+        return str(_safe_eval_node(tree))
+    except ZeroDivisionError:
+        return "Ошибка: деление на ноль"
     except Exception as e:
         return f"Ошибка вычисления: {e}"
 
@@ -74,6 +84,30 @@ def get_all_tools_schemas() -> list[dict[str, Any]]:
     """Возвращает список JSON Schema всех зарегистрированных инструментов."""
     return [info["schema"] for info in TOOL_REGISTRY.values()]
 
+def describe_tools() -> str:
+    """Собирает описание всех инструментов для системного промпта.
+
+    Читает реестр В МОМЕНТ ВЫЗОВА, а не при импорте модуля. Это важно:
+    Глава 3 регистрирует свои инструменты позже, и если бы описание
+    считалось один раз на уровне модуля, они бы в промпт не попали.
+
+    В сигнатуре печатаются имена параметров — иначе модель узнаёт их
+    только из few-shot примеров и начинает выдумывать свои.
+    """
+    lines = []
+    for info in get_all_tools_schemas():
+        fn = info["function"]
+        params = ", ".join(fn["parameters"]["properties"].keys())
+        lines.append(f"- {fn['name']}({params}): {fn['description']}")
+    return "\n".join(lines)
+
+def get_tool_parameters(tool_name: str) -> list[str]:
+    """Возвращает имена параметров инструмента в порядке объявления."""
+    if tool_name not in TOOL_REGISTRY:
+        return []
+    schema = TOOL_REGISTRY[tool_name]["schema"]["function"]["parameters"]
+    return list(schema["properties"].keys())
+
 def execute_tool(tool_name: str, arguments: dict[str, Any]) -> str:
     """Единый диспетчер вызовов."""
     if tool_name not in TOOL_REGISTRY:
@@ -84,7 +118,13 @@ def execute_tool(tool_name: str, arguments: dict[str, Any]) -> str:
         result = func(**arguments)
         return str(result)
     except TypeError as e:
-        return f"Ошибка валидации аргументов: {e}. Проверь имена и количество параметров."
+        # Схема уже знает правильные имена — подсказываем их модели, чтобы
+        # на следующей итерации она исправила вызов сама.
+        expected = list(get_tool_parameters(tool_name))
+        return (
+            f"Ошибка валидации аргументов для '{tool_name}': {e}. "
+            f"Ты передал: {list(arguments.keys())}. Ожидались строго: {expected}."
+        )
     except Exception as e:
         return f"Ошибка выполнения: {e}"
 
@@ -121,7 +161,7 @@ def extract_tool_calls(text: str) -> list:
             obj, end = decoder.raw_decode(text, start)
             if isinstance(obj, dict) and "name" in obj:
                 calls.append(obj)
-            pos = start + end
+            pos = end
         except json.JSONDecodeError:
             pos = start + 1
 

@@ -34,9 +34,10 @@ jobs:
         run: ruff check .
 
       - name: Компиляция всех модулей
-        run: python -m compileall -q chapter1 chapter2 chapter3 chapter4 chapter5 chapter6 chapter7 chapter8
+        run: python -m compileall -q chapter1 chapter2 chapter3
 
       # Ollama в CI нет, поэтому проверяем только то, что работает без модели:
-      # импорт всех глав, реестр плагинов, парсер вызовов, калькулятор, чанкинг.
+      # импорт всех глав, реестр инструментов, парсер вызовов, калькулятор,
+      # обрезку контекста, суммаризацию, память и санитизацию вывода.
       - name: Проверки без модели
         run: python ci_smoke.py

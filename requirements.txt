@@ -1,3 +1,6 @@
-﻿requests>=2.31.0
-chromadb>=0.4.22
+requests>=2.31.0
 pytest>=7.4.0
+pytest-timeout>=2.2.0
+
+# Векторная база для глав про RAG. Главам 1-3 не нужна.
+chromadb>=0.4.22

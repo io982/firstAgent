@@ -4,16 +4,19 @@
 import subprocess
 import sys
 
+# Консоль Windows по умолчанию живёт в cp1251 и не умеет печатать эмодзи.
+# Без этой строки скрипт падает с UnicodeEncodeError ещё до первого теста.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
 print("🔍 Запускаю быстрые тесты для всех глав...")
 print("=" * 60)
 
-# Список глав с тестами
+# Список глав с тестами. Добавляйте сюда главы по мере написания.
 chapters = [
     "chapter1/test_agent.py",
     "chapter2/tests.py",
-    # Добавь сюда главы по мере написания:
-    # "chapter2/test_paraphraser.py",
-    # "chapter3/test_agent.py",
+    "chapter3/tests.py",
 ]
 
 failed = []

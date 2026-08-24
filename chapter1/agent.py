@@ -6,6 +6,7 @@ import ast
 import inspect
 import json
 import operator
+import os
 import re
 import subprocess
 import sys
@@ -20,9 +21,19 @@ import requests
 OLLAMA_URL = "http://localhost:11434/api/chat"
 OLLAMA_BASE = "http://localhost:11434"
 
-MODEL = "qwen2.5:3b"
+# Модель меняется переменной окружения AGENT_MODEL, править код не нужно:
+#   PowerShell:   $env:AGENT_MODEL = "llama3.1:8b"
+#   Linux/macOS:  export AGENT_MODEL=llama3.1:8b
+MODEL = os.environ.get("AGENT_MODEL", "qwen2.5:3b")
 MAX_ITERATIONS = 5
-NUM_CTX = 4096
+
+# Размер контекстного окна. 4096 — НАШ выбор, а не предел модели:
+# qwen2.5:3b умеет 32768. Больше окно — больше помещается, но растёт
+# и расход видеопамяти под KV-кэш, и время чтения контекста.
+# Меняется переменной окружения, код править не нужно:
+#   PowerShell:   $env:AGENT_NUM_CTX = "8192"
+#   Linux/macOS:  export AGENT_NUM_CTX=8192
+NUM_CTX = int(os.environ.get("AGENT_NUM_CTX", "4096"))
 KEEP_ALIVE = "5m"
 VERBOSE = True
 #VERBOSE = False
@@ -178,18 +189,47 @@ def ensure_ollama_running() -> bool:
         print(f"❌ Не удалось запустить Ollama: {e}")
         return False
 
-def preload_model():
-    """Прогревает модель, чтобы первый ответ был мгновенным."""
+def list_installed_models() -> list:
+    """Возвращает список моделей, установленных в Ollama."""
+    try:
+        response = requests.get(f"{OLLAMA_BASE}/api/tags", timeout=5)
+        response.raise_for_status()
+        return [m["name"] for m in response.json().get("models", [])]
+    except Exception:
+        return []
+
+def preload_model() -> bool:
+    """Прогревает модель, чтобы первый ответ был мгновенным.
+
+    Если модели нет — показывает установленные и подсказывает, что делать.
+    """
     print(f"📦 Предзагрузка модели '{MODEL}' в память...")
     try:
-        requests.post(
+        response = requests.post(
             f"{OLLAMA_BASE}/api/generate",
             json={"model": MODEL, "prompt": "", "keep_alive": KEEP_ALIVE, "options": {"num_predict": 1}},
             timeout=120
         )
+        response.raise_for_status()
         print("✅ Модель готова к работе!\n")
-    except Exception:
-        pass
+        return True
+    except requests.exceptions.HTTPError:
+        installed = list_installed_models()
+        print(f"\n❌ Модель '{MODEL}' не найдена в Ollama.")
+        if installed:
+            print("   Установленные модели:")
+            for name in installed:
+                print(f"     - {name}")
+            print("\n   Взять одну из них (код править не нужно):")
+            print(f'     PowerShell:  $env:AGENT_MODEL = "{installed[0]}"')
+            print(f"     Linux/macOS: export AGENT_MODEL={installed[0]}")
+        else:
+            print("   Установленных моделей нет вообще.")
+        print(f"\n   Либо скачать нужную:  ollama pull {MODEL}\n")
+        return False
+    except Exception as e:
+        print(f"⚠️ Прогрев не удался ({e}), продолжаю без него.\n")
+        return False
 
 def extract_json_from_text(text: str) -> dict | None:
     """Извлекает JSON из текста модели."""
@@ -339,7 +379,8 @@ def main():
         print("\n❌ Не удалось запустить Ollama. Завершение работы.")
         return
 
-    preload_model()
+    if not preload_model():
+        sys.exit(1)
 
     print(f"🚀 Агент запущен (Модель: {MODEL}, Макс. итераций: {MAX_ITERATIONS})")
     print("Введите 'выход' или 'exit' для завершения.\n")
