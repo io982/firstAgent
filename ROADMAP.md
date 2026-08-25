@@ -18,28 +18,11 @@
 
 ## Дополнения к главе
 
-### Constrained decoding — ограниченная генерация ✅ ГОТОВО
-
-Схемы инструментов строятся в реестре (`chapter2/src/tools.py`). Отдаём их
-модели не текстом в промпте, а ограничением на генерацию — модель физически
-не может выдать невалидный JSON.
-
-* `format` в Ollama: JSON Schema прямо в вызове API — `build_response_schema()`
-* `enum` в поле `name`: выдумать несуществующий инструмент грамматика не даёт
-* Нативные `response_format` / `json_schema` у remote-провайдеров
-* `outlines`, `lm-format-enforcer`, GBNF-грамматики — если работаете с llama.cpp или vLLM напрямую
-* Что понижено в статусе: `extract_tool_calls` остаётся фоллбэком для серверов без `format` (`AGENT_STRUCTURED=0`)
-
-Граница метода:
-
-```
-Constrained decoding       ──► гарантирует синтаксис
-Валидация аргументов       ──► ловит семантику
-Ошибка обратно в контекст  ──► даёт модели шанс исправиться
-```
-
-Ограниченная генерация не мешает модели выбрать не тот инструмент и придумать
-значение аргумента. Три уровня остаются все три; первый не отменяет двух других.
+* ~~Constrained decoding — ограниченная генерация~~ — сделано: реестр схем в
+  `chapter2/src/tools.py`, `format` в вызове Ollama, `enum` в поле `name`,
+  фоллбэк `extract_tool_calls` при `AGENT_STRUCTURED=0`. Разбор и граница метода
+  — в разделе «Constrained decoding: JSON, который нельзя сломать»
+  [текста главы](chapter2/README.md).
 
 ### MCP — Model Context Protocol 🚧 ЗАПЛАНИРОВАНО
 
@@ -63,69 +46,36 @@ MCP servers (чужие)  ──┘
 
 Учимся управлять контекстом небольших моделей.
 
-## 3.1. Context window
+Программа главы закрыта целиком, разбор — в тексте:
 
-* Tokens
-* Context budget
-* Что занимает контекст
-* Context overflow
+* ~~3.1. Context window: tokens, context budget, что занимает контекст, context overflow~~
+* ~~3.2. Short-term memory: conversation history, agent state, scratchpad~~
+* ~~3.3. Context management: trimming, summarization, compression, selective history~~
+* ~~3.4. Long-term memory: facts, preferences, previous tasks, memory retrieval~~
+* ~~3.5. Performance: latency, token throughput, streaming, caching~~
+* ~~Иерархия памяти Core / Working / Archival — разметка и риски на малой модели~~
+  (перенесено в разделы «Где мы находимся» и «Почему Core memory не добавлена
+  именно здесь» [текста главы](chapter3/README.md))
 
-## 3.2. Short-term memory
+## Дополнения к главе
 
-* Conversation history
-* Agent state
-* Scratchpad
-
-## 3.3. Context management
-
-* Trimming
-* Summarization
-* Compression
-* Selective history
-
-## 3.4. Long-term memory
-
-* Facts
-* Preferences
-* Previous tasks
-* Memory retrieval
-
-### Иерархия памяти: Core / Working / Archival
-
-Уточнение к тому, что в главе уже реализовано. Три уровня различаются не
-хранилищем, а тем, кто и когда решает, что в них лежит:
-
-| Уровень | Где живёт | Кто пишет |
-|---|---|---|
-| **Core memory** | всегда в контексте | агент правит сам, объём фиксирован |
-| **Working memory** | текущий диалог, scratchpad | оркестратор, автоматически |
-| **Archival memory** | внешнее хранилище | агент сам вызывает save / search |
+### Core memory — блок, который агент правит сам 🚧 ЗАПЛАНИРОВАНО
 
 Working (`Conversation` + scratchpad) и Archival (`LongTermMemory` с пятью
-инструментами) в главе есть — разметка описана в [3.4 текста главы](chapter3/README.md).
-Не хватает Core: короткого блока фактов о пользователе и проекте, который агент
-редактирует сам и который виден всегда. 🚧 ЗАПЛАНИРОВАНО.
+инструментами) в главе реализованы. Core — нет: короткого блока фактов о
+пользователе и проекте, который виден всегда и который агент редактирует сам,
+в коде не появилось. Почему это опасно на 3B — уже написано в главе; что
+осталось сделать в коде:
 
-### Почему Core memory опасна на малой модели
-
-Самостоятельная правка профиля на 3B ломается так же, как ломались правила в
-промпте (см. «Правила в промпте — шрамы от ошибок»). Ограничения обязательны:
-
-* фиксированный лимит символов на блок;
-* запись только через схему с полями, а не свободным текстом;
-* правка — замена конкретного поля, а не перезапись блока целиком;
-* лог всех изменений, чтобы было видно, как агент затирает себе память.
+* блок фиксированного объёма, всегда попадающий в `build_messages()`;
+* запись через схему с полями, а не свободным текстом;
+* операция «заменить поле X», а не «вот новый блок целиком»;
+* лимит символов на поле и на блок;
+* лог всех изменений, чтобы деградация памяти была видна.
 
 MemGPT / Letta — влиятельный дизайн, но не индустриальный стандарт. В продакшене
 чаще обходятся более скучным «профиль-запись + RAG по истории». Иерархию стоит
 знать, а не копировать целиком.
-
-## 3.5. Performance
-
-* Latency
-* Token throughput
-* Streaming
-* Caching
 
 ### Главная идея
 
@@ -705,7 +655,9 @@ Manager
 ## 12.1. Threat model
 
 * Prompt injection
-* Indirect prompt injection
+* ~~Indirect prompt injection~~ — базовая защита уже сделана в Главе 3:
+  `sanitize_tool_output`, отдельный разбор инъекции через суммаризатор
+  ([текст](chapter3/README.md)). Здесь остаётся системный взгляд, а не первый заход.
 * Malicious documents
 * Malicious web pages
 * Tool abuse
