@@ -319,9 +319,10 @@ python -m chapter3.agent
 ```python
 # chapter3/agent.py — берём из Главы 2 всё, кроме цикла
 from chapter2.agent import (
+    EMPTY_ANSWER_HINT,       # текст ошибки на пустой ответ модели
     STRUCTURED_OUTPUT,       # флаг constrained decoding — без изменений
     build_system_prompt,     # сборщик промпта: позовём его заново
-    is_safe_query,           # проверка запроса — без изменений
+    is_safe_query,           # проверка запроса (родом из Главы 1)
     request_model,           # ядро связи с Ollama (через Главу 1)
 )
 from chapter2.src.tools import (

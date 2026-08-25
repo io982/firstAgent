@@ -16,6 +16,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from chapter1.agent import NUM_CTX
 from chapter2.agent import (
+    EMPTY_ANSWER_HINT,
     STRUCTURED_OUTPUT,
     build_system_prompt,
     is_safe_query,
@@ -185,6 +186,14 @@ def ask_agent(
         tool_calls, final_answer = parse_agent_response(content)
 
         if not tool_calls:
+            if not final_answer:
+                # Пустой ответ — не ответ. Ошибка уходит обратно в контекст,
+                # как ошибка инструмента (константа взята из Главы 2).
+                print("⚠️ Модель вернула пустой ответ. Прошу переделать.")
+                conversation.add("assistant", content)
+                conversation.add("user", EMPTY_ANSWER_HINT)
+                continue
+
             # Нет вызова инструмента = финальный ответ.
             # Кладём его в историю, иначе следующая реплика его не увидит.
             # В историю идёт именно текст ответа, а не JSON-обёртка: следующей

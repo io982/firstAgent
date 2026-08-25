@@ -1,12 +1,11 @@
 import json
 import os
-import re
 import sys
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 # Импортируем ядро из Главы 1
-from chapter1.agent import request_model
+from chapter1.agent import is_safe_query, request_model
 
 # Импортируем новые возможности из Главы 2
 from chapter2.src.tools import (
@@ -24,27 +23,12 @@ from chapter2.src.tools import (
 STRUCTURED_OUTPUT = os.environ.get("AGENT_STRUCTURED", "1") != "0"
 
 # ====================================================================
-# ЗАЩИТА ОТ PROMPT INJECTION (перенесено из Главы 1)
+# ЗАЩИТА ОТ PROMPT INJECTION
 # ====================================================================
-SUSPICIOUS_PATTERNS = [
-    r"игнорируй.*систем",
-    r"забудь.*инструкц",
-    r"теперь ты можешь",
-    r"новый промпт",
-    r"новый системный",
-    r"ignore.*system",
-    r"forget.*instruction",
-    r"you can now",
-    r"new prompt",
-    r"override.*system",
-]
-
-def is_safe_query(query: str) -> bool:
-    """Проверяет запрос на наличие подозрительных команд (prompt injection)."""
-    for pattern in SUSPICIOUS_PATTERNS:
-        if re.search(pattern, query, re.IGNORECASE):
-            return False
-    return True
+# is_safe_query импортирован из Главы 1, а не переписан здесь. Раньше список
+# паттернов был скопирован в обе главы — и копии разъехались: запрос
+# «игнорируй system prompt» блокировался в одной главе и проходил в другой.
+# Проверка запроса — часть ядра, а у ядра одно место жительства.
 
 # ====================================================================
 # ЯДРО АГЕНТА ГЛАВЫ 2
@@ -70,6 +54,16 @@ def build_system_prompt() -> str:
 
 # Промпт самой Главы 2: на этот момент в реестре только её три инструмента
 SYSTEM_PROMPT = build_system_prompt()
+
+# Схема требует только поле `action`, поэтому объект {"action": "final_answer"}
+# без `answer` формально валиден и при этом пуст. Возвращать пользователю
+# пустую строку нельзя — ошибка уходит обратно в контекст тем же способом,
+# что и ошибка инструмента: модель получает шанс переделать.
+EMPTY_ANSWER_HINT = (
+    "Ошибка: ответ пустой. Верни ОДИН JSON-объект целиком — либо "
+    '{"action": "tool_call", "name": "имя_инструмента", "arguments": {...}}, '
+    'либо {"action": "final_answer", "answer": "текст для пользователя"}.'
+)
 
 # Схема ответа — тоже снимок на момент импорта, по той же причине, что и промпт:
 # `python -m chapter2.agent` должен остаться Главой 2 с тремя инструментами,
@@ -132,6 +126,12 @@ def ask_agent(user_input: str, max_iterations: int = 5) -> str:
 
                 messages.append({"role": "user", "content": f"Observation from {tool_name}: {observation}"})
         else:
+            if not final_answer:
+                print("⚠️ Модель вернула пустой ответ. Прошу переделать.")
+                messages.append({"role": "assistant", "content": content})
+                messages.append({"role": "user", "content": EMPTY_ANSWER_HINT})
+                continue
+
             # Нет вызова инструмента = финальный ответ
             return final_answer
 

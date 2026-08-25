@@ -604,6 +604,28 @@ class TestAskAgentKeepsConversation:
         assert "Первая реплика" not in sent
 
     @patch("chapter3.agent.request_model")
+    def test_empty_answer_is_not_returned_to_user(self, mock_request):
+        """Валидный по схеме, но пустой ответ не выдаётся за финальный.
+
+        Схема требует только поле action, поэтому {"action": "final_answer"}
+        без answer грамматику проходит. Пользователь такого ответа видеть
+        не должен — ошибка уходит модели обратно, как ошибка инструмента.
+        """
+        mock_request.side_effect = [
+            '{"action": "final_answer"}',
+            '{"action": "final_answer", "answer": "Готово"}',
+        ]
+        conv = new_conversation()
+
+        answer = ask_agent("Что-нибудь спроси", conversation=conv)
+
+        assert answer == "Готово"
+        assert mock_request.call_count == 2
+        # Подсказка про пустой ответ попала в контекст второго запроса
+        sent = [m["content"] for m in mock_request.call_args[0][0]]
+        assert any("ответ пустой" in c for c in sent)
+
+    @patch("chapter3.agent.request_model")
     def test_injection_is_not_written_into_history(self, mock_request):
         mock_request.return_value = "Ответ"
         conv = new_conversation()
