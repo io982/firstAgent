@@ -70,6 +70,19 @@ EMPTY_ANSWER_HINT = (
 # даже если Глава 3 успела зарегистрировать свои пять.
 RESPONSE_SCHEMA = build_response_schema()
 
+
+def refresh_tool_snapshots() -> None:
+    """Пересобирает промпт и схему по текущему содержимому реестра.
+
+    Нужна ровно тогда, когда инструменты появились ПОСЛЕ импорта модуля —
+    например, их принёс MCP-сервер. Снимки, снятые при импорте, о них не знают:
+    модель не увидит инструмент в промпте, а `enum` в схеме не даст его назвать.
+    """
+    global SYSTEM_PROMPT, RESPONSE_SCHEMA
+    SYSTEM_PROMPT = build_system_prompt()
+    RESPONSE_SCHEMA = build_response_schema()
+
+
 def ask_agent(user_input: str, max_iterations: int = 5) -> str:
     """Цикл ReAct, использующий новый Tool API и защиту от инъекций."""
 
@@ -134,6 +147,7 @@ def ask_agent(user_input: str, max_iterations: int = 5) -> str:
 if __name__ == "__main__":
     # Импортируем утилиты запуска из Главы 1
     from chapter1.agent import ensure_ollama_running, preload_model
+    from chapter2.src.mcp_client import connect_mcp_servers
 
     if not ensure_ollama_running():
         print("\n❌ Не удалось запустить Ollama. Завершение работы.")
@@ -142,13 +156,27 @@ if __name__ == "__main__":
     if not preload_model():
         sys.exit(1)
 
-    print("🤖 Агент с Tool API готов. Введите 'выход' для завершения.")
-    while True:
-        user_input = input("\nВы: ")
-        if user_input.lower() in ["выход", "exit", "quit"]:
-            break
-        if not user_input.strip():
-            continue
+    # Чужие инструменты подключаются только здесь и только по требованию.
+    # Без AGENT_MCP Глава 2 остаётся Главой 2 с тремя своими инструментами:
+    #   PowerShell:   $env:AGENT_MCP = "demo"
+    #   Linux/macOS:  AGENT_MCP=demo python -m chapter2.agent
+    mcp_clients = connect_mcp_servers(os.environ.get("AGENT_MCP", ""))
+    if mcp_clients:
+        # Реестр пополнился уже после импорта — снимки промпта и схемы устарели.
+        refresh_tool_snapshots()
 
-        answer = ask_agent(user_input)
-        print(f"\n✅ Ответ: {answer}")
+    print("🤖 Агент с Tool API готов. Введите 'выход' для завершения.")
+    try:
+        while True:
+            user_input = input("\nВы: ")
+            if user_input.lower() in ["выход", "exit", "quit"]:
+                break
+            if not user_input.strip():
+                continue
+
+            answer = ask_agent(user_input)
+            print(f"\n✅ Ответ: {answer}")
+    finally:
+        # Серверы — наши дочерние процессы. Не закроем канал — останутся жить.
+        for client in mcp_clients:
+            client.close()
