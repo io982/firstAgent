@@ -20,6 +20,12 @@ from chapter2.src.tools import tool
 # Путь к файлу памяти (по умолчанию в директории главы)
 DEFAULT_MEMORY_PATH = Path(__file__).parent.parent / "memory.json"
 
+# Потолки на вывод list_memories. Смысл тот же, что у лимита read_file:
+# результат инструмента попадает прямо в контекст, а число фактов на диске
+# ничем не ограничено — без потолка память однажды вытеснит сам разговор.
+LIST_TOTAL_LIMIT = 1500   # символов на весь список
+LIST_LINE_LIMIT = 200     # символов на одну строку «ключ: значение»
+
 
 class LongTermMemory:
     """
@@ -110,14 +116,38 @@ class LongTermMemory:
         """
         Возвращает список всех сохранённых фактов.
 
+        Вывод ограничен: он уходит прямо в контекст, а память растёт без
+        предела. read_file обрезан по той же причине — разница лишь в том,
+        что файл вы видите глазами, а список фактов копится незаметно.
+
         Returns:
             Строка со списком ключей или сообщение об отсутствии.
         """
         if not self._data:
             return "📭 Память пуста."
 
-        items = [f"  - {k}: {v}" for k, v in self._data.items()]
-        return "📚 Сохранённые факты:\n" + "\n".join(items)
+        lines: list[str] = []
+        used = 0
+        for key, value in self._data.items():
+            line = f"  - {key}: {value}"
+            if len(line) > LIST_LINE_LIMIT:
+                line = line[:LIST_LINE_LIMIT] + " …(значение обрезано)"
+            if lines and used + len(line) > LIST_TOTAL_LIMIT:
+                break
+            lines.append(line)
+            used += len(line)
+
+        result = "📚 Сохранённые факты:\n" + "\n".join(lines)
+
+        hidden = len(self._data) - len(lines)
+        if hidden:
+            # Не молчим о пропущенном: иначе модель считает показанное
+            # всей памятью и отвечает «больше я о вас ничего не знаю».
+            result += (
+                f"\n  […ещё {hidden} фактов не показано: список не помещается "
+                f"в контекст. Доставай их по ключу через recall]"
+            )
+        return result
 
     def clear_all(self) -> str:
         """Очищает всю память."""

@@ -7,6 +7,7 @@ import pytest
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from chapter2.src.tools import (
+    READ_FILE_LIMIT,
     TOOL_REGISTRY,
     build_response_schema,
     calculator,
@@ -98,9 +99,24 @@ def test_read_file_safety():
         f.write("A" * 3000)
 
     result = read_file(test_file)
-    assert len(result) <= 2000  # Проверка лимита в 2000 символов из tools.py
+    # Содержимое обрезано лимитом из tools.py, а сама обрезка проговорена:
+    # молча укороченный файл модель принимает за файл целиком.
+    assert result.count("A") == READ_FILE_LIMIT
+    assert "обрезан" in result
 
     os.remove(test_file)
+
+
+def test_read_file_short_file_has_no_truncation_note():
+    """Файл в пределах лимита возвращается как есть, без служебных пометок."""
+    test_file = "test_small_file.txt"
+    with open(test_file, "w", encoding="utf-8") as f:
+        f.write("короткий файл")
+
+    try:
+        assert read_file(test_file) == "короткий файл"
+    finally:
+        os.remove(test_file)
 
 # ====================================================================
 # 4. Constrained decoding: схема ответа и её разбор

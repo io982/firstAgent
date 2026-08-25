@@ -176,11 +176,10 @@ def ask_agent(
             f"из {NUM_CTX}"
         )
 
-        response = request_model(
+        content = request_model(
             messages,
             response_format=RESPONSE_SCHEMA if STRUCTURED_OUTPUT else None,
         )
-        content = response if isinstance(response, str) else response.get("content", "")
         print(f"🤖 Модель:\n{content}")
 
         tool_calls, final_answer = parse_agent_response(content)

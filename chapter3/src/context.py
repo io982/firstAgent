@@ -112,6 +112,46 @@ def trim_by_tokens(messages: list[dict[str, Any]], max_tokens: int) -> list[dict
 
 
 # ====================================================================
+# ПАРА «ВЫЗОВ ИНСТРУМЕНТА → OBSERVATION»
+# ====================================================================
+
+# Префикс, по которому результат инструмента узнаётся в истории.
+# Один на весь код: add_observation его ставит, is_observation по нему ищет.
+OBSERVATION_PREFIX = "Observation from "
+
+
+def is_observation(message: dict[str, Any]) -> bool:
+    """Это результат инструмента, а не реплика человека?"""
+    content = message.get("content") or ""
+    return message.get("role") == "user" and str(content).startswith(OBSERVATION_PREFIX)
+
+
+def drop_orphan_observations(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Убирает Observation, оставшиеся в начале окна без своего вызова.
+
+    trim_by_tokens режет по границе сообщений и ничего не знает о том, что
+    вызов инструмента и его результат — одна единица. Если бюджет прошёл
+    между ними, история начинается с ответа на вопрос, которого в ней нет.
+    Модель видит результат, не находит вызова — и достраивает недостающее
+    сама: либо считает работу уже сделанной, либо повторяет вызов.
+
+    Данные при этом теряются, и это осознанный размен: рассинхронизированная
+    история обходится дороже, чем недостающий кусок текста.
+    """
+    start = 0
+    while start < len(messages) and is_observation(messages[start]):
+        start += 1
+
+    if start == len(messages):
+        # Всё окно — одни Observation. Отдать пустую историю хуже:
+        # пусть модель видит хотя бы результат последнего вызова.
+        # Тот же выбор, что и в trim_by_tokens.
+        return messages
+
+    return messages[start:]
+
+
+# ====================================================================
 # СУММАРИЗАЦИЯ (пункт 3.3 ROADMAP)
 # ====================================================================
 
@@ -286,8 +326,11 @@ class Conversation:
 
         Роль `user`, а не `assistant`: это сообщение внешнего мира, а не
         слова модели. Иначе модель считает выдуманные ею данные своим знанием.
+
+        Префикс — не украшение: по нему обрезка отличает результат инструмента
+        от реплики человека и не отрывает его от вызова.
         """
-        self.add("user", f"Observation from {tool_name}: {observation}")
+        self.add("user", f"{OBSERVATION_PREFIX}{tool_name}: {observation}")
 
     # ---------------------------------------------------------------- чтение
 
@@ -313,7 +356,11 @@ class Conversation:
             # полномочиями и отменяет ими настоящий промпт (проверено).
             messages.append({"role": "user", "content": sanitize_summary(self.summary)})
 
-        messages.extend(trim_by_tokens(self.history, self.max_history_tokens))
+        # Сначала режем по весу, потом убираем хвост, оставшийся без вызова:
+        # окно, начинающееся с Observation, модель читает как результат
+        # действия, которого в истории нет.
+        recent = trim_by_tokens(self.history, self.max_history_tokens)
+        messages.extend(drop_orphan_observations(recent))
 
         if reminder:
             messages.append({"role": "system", "content": reminder})
@@ -337,6 +384,12 @@ class Conversation:
 
         # Свежее оставляем как есть, всё остальное уходит в резюме
         recent = trim_by_tokens(self.history, self.max_history_tokens // 2)
+
+        # Если граница прошла между вызовом инструмента и его результатом,
+        # сдвигаем её вперёд: осиротевший Observation уезжает в резюме,
+        # а не остаётся в истории навсегда без своего вызова.
+        recent = drop_orphan_observations(recent)
+
         old = self.history[: len(self.history) - len(recent)]
 
         if not old:
@@ -352,6 +405,12 @@ class Conversation:
         if not summary:
             # Суммаризация не удалась — просто выбрасываем старое.
             # Потерять часть истории лучше, чем переполнить контекст.
+            # Но молча этого делать нельзя: агент печатает сообщение только
+            # об удачном сжатии, и потеря выглядела бы как «ничего не было».
+            print(
+                f"⚠️ Сжать историю не удалось. Отбрасываю {len(old)} старых "
+                f"сообщений, чтобы не переполнить контекст."
+            )
             self.history = recent
             return False
 

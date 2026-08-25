@@ -21,14 +21,16 @@ from chapter3.agent import (
 )
 from chapter3.src.context import (
     Conversation,
+    drop_orphan_observations,
     estimate_messages_tokens,
     estimate_tokens,
+    is_observation,
     smart_trim_history,
     summarize_history,
     trim_by_tokens,
     trim_history,
 )
-from chapter3.src.memory import LongTermMemory
+from chapter3.src.memory import LIST_TOTAL_LIMIT, LongTermMemory
 from chapter3.src.security import looks_like_instruction, sanitize_tool_output
 
 
@@ -283,6 +285,31 @@ class TestLongTermMemory:
         assert "key1" in result
         assert "key2" in result
 
+    def test_list_memories_is_capped(self, tmp_path):
+        """Список фактов не растёт бесконечно: он уходит прямо в контекст."""
+        memory = LongTermMemory(storage_path=tmp_path / "test_memory.json")
+        for i in range(200):
+            memory.remember(f"key{i}", f"значение {i}")
+
+        result = memory.list_memories()
+
+        assert len(result) < LIST_TOTAL_LIMIT * 2
+        # О пропущенном сообщаем: иначе модель считает показанное всей памятью
+        assert "не показано" in result
+        assert "recall" in result
+
+    def test_single_huge_value_does_not_blow_up_the_list(self, tmp_path):
+        """Один гигантский факт не вытесняет остальные."""
+        memory = LongTermMemory(storage_path=tmp_path / "test_memory.json")
+        memory.remember("огромный", "х" * 10_000)
+        memory.remember("обычный", "значение")
+
+        result = memory.list_memories()
+
+        assert "обычный" in result
+        assert "значение обрезано" in result
+        assert len(result) < LIST_TOTAL_LIMIT * 2
+
     def test_empty_memory(self, tmp_path):
         memory_file = tmp_path / "test_memory.json"
         memory = LongTermMemory(storage_path=memory_file)
@@ -340,6 +367,66 @@ class TestTrimByTokens:
         """Отдать модели пустую историю хуже, чем превысить оценку."""
         messages = [{"role": "user", "content": "а" * 1000}]
         assert trim_by_tokens(messages, 10) == messages
+
+
+class TestOrphanObservations:
+    """Обрезка не отрывает результат инструмента от его вызова."""
+
+    def test_leading_observation_without_call_is_dropped(self):
+        messages = [
+            {"role": "user", "content": "Observation from read_file: содержимое"},
+            {"role": "assistant", "content": "Ответ"},
+        ]
+        assert drop_orphan_observations(messages) == messages[1:]
+
+    def test_normal_history_is_untouched(self):
+        messages = [
+            {"role": "user", "content": "Прочитай файл"},
+            {"role": "assistant", "content": '{"action": "tool_call"}'},
+            {"role": "user", "content": "Observation from read_file: содержимое"},
+        ]
+        assert drop_orphan_observations(messages) == messages
+
+    def test_window_of_only_observations_is_kept(self):
+        """Пустая история хуже осиротевшего результата — тот же выбор, что в trim."""
+        messages = [{"role": "user", "content": "Observation from calculator: 42"}]
+        assert drop_orphan_observations(messages) == messages
+
+    @staticmethod
+    def _dialog_with_tool_calls(conv: Conversation) -> None:
+        """Десять шагов «вопрос → вызов → результат» одинакового веса.
+
+        Ровные размеры нужны, чтобы граница бюджета попадала предсказуемо:
+        при бюджете 60 токенов окно начинается ровно на Observation.
+        """
+        for _ in range(10):
+            conv.add("user", "в" * 30)
+            conv.add("assistant", "а" * 30)
+            conv.add_observation("calculator", "42")
+
+    def test_build_messages_does_not_start_with_orphan(self):
+        """Бюджет прошёл между вызовом и результатом — результат не отдаём."""
+        conv = Conversation(system_prompt="SYS", max_history_tokens=60)
+        self._dialog_with_tool_calls(conv)
+
+        # Без drop_orphan_observations окно начиналось бы с Observation
+        assert is_observation(trim_by_tokens(conv.history, 60)[0])
+
+        history = [m for m in conv.build_messages() if m["content"] != "SYS"]
+        assert history, "история не должна опустеть"
+        assert not is_observation(history[0])
+
+    def test_compact_moves_orphan_into_summary(self):
+        """Осиротевший Observation уезжает в резюме, а не остаётся навсегда."""
+        conv = Conversation(
+            "SYS",
+            max_history_tokens=120,   # на свежую часть уйдёт половина — 60
+            summarizer_fn=lambda msgs: "Пользователь считал выражения и получал результаты",
+        )
+        self._dialog_with_tool_calls(conv)
+
+        assert conv.compact() is True
+        assert not is_observation(conv.history[0])
 
 
 class TestConversation:
@@ -476,6 +563,20 @@ class TestConversation:
         assert conv.compact() is False
         assert conv.summary == ""
         assert len(conv.history) < before
+
+    def test_failed_compact_reports_the_loss(self, capsys):
+        """Потеря истории не должна быть молчаливой.
+
+        Агент печатает сообщение только об удачном сжатии, поэтому неудачное
+        выглядело бы как «ничего не произошло» — а история при этом урезана.
+        """
+        conv = Conversation("SYS", max_history_tokens=40, summarizer_fn=lambda msgs: "")
+        for i in range(20):
+            conv.add("user", f"реплика {i} " * 10)
+
+        conv.compact()
+
+        assert "Отбрасываю" in capsys.readouterr().out
 
     def test_reset_clears_dialog_only(self):
         conv = Conversation("SYS", max_history_tokens=40, summarizer_fn=lambda m: "резюме")

@@ -266,29 +266,6 @@ def extract_json_from_text(text: str) -> dict | None:
                 pass
     return None
 
-def extract_unknown_tool_names(text: str) -> list:
-    """Ищет в ответе вызовы инструментов, которых у агента нет."""
-    names = []
-    for block in re.findall(r"```(?:json)?\s*(.*?)\s*```", text, re.DOTALL):
-        try:
-            obj = json.loads(block)
-            if isinstance(obj, dict) and "tool" in obj and obj["tool"] not in TOOLS:
-                names.append(obj["tool"])
-        except json.JSONDecodeError:
-            pass
-
-    start = text.find("{")
-    if start != -1:
-        end = text.rfind("}")
-        if end != -1:
-            try:
-                obj = json.loads(text[start:end + 1])
-                if isinstance(obj, dict) and "tool" in obj and obj["tool"] not in TOOLS:
-                    names.append(obj["tool"])
-            except json.JSONDecodeError:
-                pass
-    return list(dict.fromkeys(names))
-
 def execute_tool(tool_name: str, args: dict) -> str:
     """Выполняет инструмент и обрабатывает ВСЕ возможные ошибки."""
     if tool_name not in TOOLS:
@@ -352,38 +329,26 @@ def ask_agent(user_query: str) -> str:
         if VERBOSE:
             print(f"🤖 Ответ модели:\n{response_text}")
 
-        unknown_tools = extract_unknown_tool_names(response_text)
-        if unknown_tools:
-            if VERBOSE:
-                print(f"⚠️ Модель попыталась вызвать несуществующий инструмент: {unknown_tools[0]}")
-            messages.append({"role": "assistant", "content": response_text})
-            messages.append({
-                "role": "user",
-                "content": f"Ошибка: инструмент '{unknown_tools[0]}' не существует. Доступные инструменты: {', '.join(TOOLS.keys())}. Попробуй снова."
-            })
-            continue
-
         parsed = extract_json_from_text(response_text)
 
         if parsed and isinstance(parsed, dict) and "tool" in parsed:
-            # Извлекаем reasoning (рассуждение)
-            reasoning = parsed.get("reasoning", "")
             tool_name = parsed["tool"]
             args = parsed.get("args", {})
 
             if VERBOSE:
-                if reasoning:
-                    print(f"💭 Рассуждение: {reasoning}")
                 print(f"⚙️ Вызов инструмента: {tool_name} с аргументами {args}")
 
+            # Выдуманный инструмент — тоже случай для execute_tool: он вернёт
+            # текст «инструмент не найден, доступные: ...», и этот текст уйдёт
+            # модели как обычное наблюдение. Отдельная проверка до вызова
+            # означала бы второй разбор ответа и второй список инструментов.
             observation = execute_tool(tool_name, args)
 
             if VERBOSE:
                 print(f"👁️ Наблюдение (результат): {observation}")
 
-            # Добавляем в историю: reasoning + вызов инструмента + результат
-            assistant_content = response_text
-            messages.append({"role": "assistant", "content": assistant_content})
+            # Добавляем в историю: вызов инструмента + результат
+            messages.append({"role": "assistant", "content": response_text})
             messages.append({"role": "user", "content": f"Результат инструмента: {observation}"})
             continue
         else:

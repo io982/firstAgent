@@ -2,9 +2,12 @@
 Компоненты Главы 3: управление контекстом, памятью и безопасностью.
 """
 from .context import (
+    OBSERVATION_PREFIX,
     Conversation,
+    drop_orphan_observations,
     estimate_messages_tokens,
     estimate_tokens,
+    is_observation,
     smart_trim_history,
     summarize_history,
     trim_by_tokens,
@@ -26,6 +29,9 @@ __all__ = [
     "trim_history",
     "trim_by_tokens",
     "smart_trim_history",
+    "drop_orphan_observations",
+    "is_observation",
+    "OBSERVATION_PREFIX",
     "Conversation",
     "summarize_history",
     "sanitize_tool_output",

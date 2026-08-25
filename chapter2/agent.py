@@ -87,16 +87,10 @@ def ask_agent(user_input: str, max_iterations: int = 5) -> str:
     for i in range(max_iterations):
         print(f"\n--- Итерация {i+1} ---")
 
-        response = request_model(
+        content = request_model(
             messages,
             response_format=RESPONSE_SCHEMA if STRUCTURED_OUTPUT else None,
         )
-
-        # request_model может возвращать строку напрямую или словарь
-        if isinstance(response, str):
-            content = response
-        else:
-            content = response.get("content", "")
 
         print(f"🤖 Модель:\n{content}")
 

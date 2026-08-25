@@ -61,6 +61,11 @@ def calculator(expression: str) -> str:
     except Exception as e:
         return f"Ошибка вычисления: {e}"
 
+# Потолок на вывод инструмента. Всё, что вернёт инструмент, уедет прямо
+# в контекст модели, а он у нас 4096 токенов на всё сразу.
+READ_FILE_LIMIT = 2000
+
+
 @tool
 def read_file(path: str) -> str:
     """Читает содержимое текстового файла по указанному пути."""
@@ -69,7 +74,19 @@ def read_file(path: str) -> str:
         if not os.path.exists(safe_path):
             return f"Файл не найден: {safe_path}"
         with open(safe_path, encoding='utf-8') as f:
-            return f.read()[:2000]
+            # Читаем на символ больше лимита: этого хватает, чтобы понять,
+            # что файл длиннее, и при этом гигабайтный файл не окажется
+            # целиком в памяти — в отличие от f.read()[:2000].
+            content = f.read(READ_FILE_LIMIT + 1)
+
+        if len(content) > READ_FILE_LIMIT:
+            # Обрезку проговариваем вслух. Молча укороченный файл модель
+            # считает файлом целиком и уверенно отвечает по половине текста.
+            return (
+                content[:READ_FILE_LIMIT]
+                + f"\n\n[...файл обрезан: показаны первые {READ_FILE_LIMIT} символов]"
+            )
+        return content
     except Exception as e:
         return f"Ошибка чтения: {e}"
 
