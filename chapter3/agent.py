@@ -16,12 +16,16 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from chapter1.agent import NUM_CTX
 from chapter2.agent import (
+    STRUCTURED_OUTPUT,
     build_system_prompt,
-    extract_tool_calls,
     is_safe_query,
     request_model,
 )
-from chapter2.src.tools import execute_tool
+from chapter2.src.tools import (
+    build_response_schema,
+    execute_tool,
+    parse_agent_response,
+)
 
 # ⚠️ ПОРЯДОК ЭТИХ ДВУХ ИМПОРТОВ ЗНАЧИМ.
 # chapter3.src подтягивает chapter3.src.memory, а тот декоратором @tool
@@ -46,6 +50,11 @@ from chapter3.src import (
 # в нём теперь все восемь инструментов, а не три. Копировать текст промпта
 # в главу не нужно — достаточно позвать ту же функцию в нужный момент.
 BASE_SYSTEM_PROMPT = build_system_prompt()
+
+# Схема ответа пересобирается здесь же и по той же причине: в enum поля `name`
+# должны попасть все восемь инструментов. Снимок Главы 2 знает только о трёх,
+# и модель с ним физически не смогла бы позвать remember.
+RESPONSE_SCHEMA = build_response_schema()
 
 MEMORY_RULES = """
 ПРАВИЛА РАБОТЫ С ПАМЯТЬЮ (Глава 3):
@@ -73,23 +82,21 @@ MEMORY_RULES = """
 
 Пример запоминания:
 User: Меня зовут Владимир.
-Assistant: {"name": "remember", "arguments": {"key": "user_name", "value": "Владимир"}}
+Assistant: {"action": "tool_call", "name": "remember", "arguments": {"key": "user_name", "value": "Владимир"}}
 
 Пример отображения списка:
 User: Покажи все факты / Что ты обо мне помнишь?
-Assistant: {"name": "list_memories", "arguments": {}}
+Assistant: {"action": "tool_call", "name": "list_memories", "arguments": {}}
 Observation: 📚 Сохранённые факты:
   - fact1: значение1
   - fact2: значение2
-Assistant: Ваши сохранённые факты:
-1. fact1: значение1
-2. fact2: значение2
+Assistant: {"action": "final_answer", "answer": "Ваши сохранённые факты: 1) fact1: значение1; 2) fact2: значение2"}
 
 Пример очистки всей памяти:
 User: Очисти всю память / Удали все факты.
-Assistant: {"name": "clear_all", "arguments": {}}
+Assistant: {"action": "tool_call", "name": "clear_all", "arguments": {}}
 Observation: 🧹 Вся память очищена.
-Assistant: Вся память успешно очищена.
+Assistant: {"action": "final_answer", "answer": "Вся память успешно очищена."}
 """.strip()
 
 ENHANCED_SYSTEM_PROMPT = f"""{BASE_SYSTEM_PROMPT}
@@ -168,18 +175,22 @@ def ask_agent(
             f"из {NUM_CTX}"
         )
 
-        response = request_model(messages)
+        response = request_model(
+            messages,
+            response_format=RESPONSE_SCHEMA if STRUCTURED_OUTPUT else None,
+        )
         content = response if isinstance(response, str) else response.get("content", "")
         print(f"🤖 Модель:\n{content}")
 
-        tool_calls = extract_tool_calls(content)
+        tool_calls, final_answer = parse_agent_response(content)
 
         if not tool_calls:
             # Нет вызова инструмента = финальный ответ.
             # Кладём его в историю, иначе следующая реплика его не увидит.
-            answer = content.strip()
-            conversation.add("assistant", answer)
-            return answer
+            # В историю идёт именно текст ответа, а не JSON-обёртка: следующей
+            # реплике нужен смысл, а не служебное поле action.
+            conversation.add("assistant", final_answer)
+            return final_answer
 
         conversation.add("assistant", content)
 

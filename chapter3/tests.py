@@ -534,6 +534,21 @@ class TestMemoryToolsInRegistry:
         assert "remember" not in CHAPTER2_PROMPT
         assert "list_memories" not in CHAPTER2_PROMPT
 
+    def test_chapter2_schema_not_polluted_by_chapter3(self):
+        """То же свойство для схемы constrained decoding, что и для промпта."""
+        from chapter2.agent import RESPONSE_SCHEMA as CHAPTER2_SCHEMA
+
+        names = CHAPTER2_SCHEMA["properties"]["name"]["enum"]
+        assert "calculator" in names
+        assert "remember" not in names
+
+    def test_chapter3_schema_knows_memory_tools(self):
+        """А схема Главы 3 пересобрана после регистрации памяти — все восемь."""
+        from chapter3.agent import RESPONSE_SCHEMA
+
+        names = RESPONSE_SCHEMA["properties"]["name"]["enum"]
+        assert {"calculator", "remember", "recall", "list_memories"} <= set(names)
+
 
 class TestContextBudget:
     """Бюджет контекста считается, а не выдумывается (пункт 3.1)."""

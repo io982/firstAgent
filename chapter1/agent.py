@@ -292,8 +292,14 @@ def execute_tool(tool_name: str, args: dict) -> str:
     except Exception as e:
         return f"Ошибка выполнения инструмента '{tool_name}': {str(e)}"
 
-def request_model(messages: list) -> str:
-    """Отправляет запрос к Ollama API и возвращает текст ответа."""
+def request_model(messages: list, response_format: dict | None = None) -> str:
+    """Отправляет запрос к Ollama API и возвращает текст ответа.
+
+    response_format — JSON Schema для constrained decoding (Глава 2).
+    Если схема передана, Ollama ограничивает генерацию на уровне токенов,
+    и модель физически не может выдать невалидный JSON. В Главе 1 параметр
+    не используется: здесь мы сначала смотрим, как ломается свободный текст.
+    """
     payload = {
         "model": MODEL,
         "messages": messages,
@@ -301,6 +307,8 @@ def request_model(messages: list) -> str:
         "keep_alive": KEEP_ALIVE,
         "options": {"temperature": 0.1, "num_ctx": NUM_CTX}
     }
+    if response_format is not None:
+        payload["format"] = response_format
     response = requests.post(OLLAMA_URL, json=payload, timeout=120)
     response.raise_for_status()
     return response.json()["message"]["content"].strip()

@@ -8,10 +8,13 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from chapter2.src.tools import (
     TOOL_REGISTRY,
+    build_response_schema,
     calculator,
     execute_tool,
     get_all_tools_schemas,
+    parse_agent_response,
     read_file,
+    tool,
 )
 
 
@@ -100,7 +103,66 @@ def test_read_file_safety():
     os.remove(test_file)
 
 # ====================================================================
-# 4. Интеграционные тесты (Требуют работающей Ollama)
+# 4. Constrained decoding: схема ответа и её разбор
+# ====================================================================
+def test_response_schema_lists_only_registered_tools():
+    """Поле name ограничено enum'ом реестра — выдумать инструмент нельзя."""
+    schema = build_response_schema()
+
+    assert schema["required"] == ["action"]
+    assert schema["properties"]["action"]["enum"] == ["tool_call", "final_answer"]
+
+    names = schema["properties"]["name"]["enum"]
+    assert set(names) == set(TOOL_REGISTRY.keys())
+    assert "calculator" in names
+
+def test_response_schema_follows_registry():
+    """Схема собирается в момент вызова, а не при импорте модуля."""
+    before = set(build_response_schema()["properties"]["name"]["enum"])
+
+    @tool
+    def _temp_probe(value: str) -> str:
+        """Временный инструмент для проверки динамики схемы."""
+        return value
+
+    try:
+        after = set(build_response_schema()["properties"]["name"]["enum"])
+        assert after - before == {"_temp_probe"}
+    finally:
+        TOOL_REGISTRY.pop("_temp_probe", None)
+
+def test_parse_structured_tool_call():
+    """Ответ по схеме разбирается без угадывания."""
+    raw = '{"action": "tool_call", "name": "calculator", "arguments": {"expression": "2+2"}}'
+    calls, answer = parse_agent_response(raw)
+
+    assert answer is None
+    assert calls == [{"name": "calculator", "arguments": {"expression": "2+2"}}]
+
+def test_parse_structured_final_answer():
+    """Финальный ответ приходит в поле answer, а не голым текстом."""
+    calls, answer = parse_agent_response('{"action": "final_answer", "answer": "Готово"}')
+
+    assert calls == []
+    assert answer == "Готово"
+
+def test_parse_falls_back_to_free_text():
+    """Без constrained decoding работает старый разбор свободного текста."""
+    raw = 'Сейчас посчитаю: {"name": "calculator", "arguments": {"expression": "2+2"}}'
+    calls, answer = parse_agent_response(raw)
+
+    assert answer is None
+    assert calls[0]["name"] == "calculator"
+
+def test_parse_plain_text_is_final_answer():
+    """Текст без вызова инструмента — финальный ответ, а не ошибка парсинга."""
+    calls, answer = parse_agent_response("  Просто ответ  ")
+
+    assert calls == []
+    assert answer == "Просто ответ"
+
+# ====================================================================
+# 5. Интеграционные тесты (Требуют работающей Ollama)
 # ====================================================================
 @pytest.mark.integration
 def test_agent_tool_integration():

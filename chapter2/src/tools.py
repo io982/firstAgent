@@ -128,12 +128,82 @@ def execute_tool(tool_name: str, arguments: dict[str, Any]) -> str:
     except Exception as e:
         return f"Ошибка выполнения: {e}"
 
+# === CONSTRAINED DECODING: СХЕМА ОТВЕТА АГЕНТА ===
+
+def build_response_schema() -> dict[str, Any]:
+    """Собирает JSON Schema ответа агента по текущему содержимому реестра.
+
+    Схема уходит в Ollama параметром `format`. Дальше модель генерирует не
+    «текст, похожий на JSON», а токены, разрешённые грамматикой: невалидный
+    JSON становится физически невозможен, а поле `name` ограничено enum'ом
+    реально зарегистрированных инструментов — выдумать несуществующий
+    инструмент модель тоже не может.
+
+    Функция, а не константа — по той же причине, что и build_system_prompt():
+    Глава 3 регистрирует свои инструменты позже, и снимок, снятый при импорте,
+    их бы не увидел.
+
+    Ответ всегда один объект — потому что шагов у агента ровно два:
+
+        action = "tool_call"     -> заполнены name и arguments
+        action = "final_answer"  -> заполнен answer
+    """
+    return {
+        "type": "object",
+        "properties": {
+            "action": {
+                "type": "string",
+                "enum": ["tool_call", "final_answer"],
+            },
+            "name": {
+                "type": "string",
+                "enum": list(TOOL_REGISTRY.keys()),
+            },
+            "arguments": {"type": "object"},
+            "answer": {"type": "string"},
+        },
+        "required": ["action"],
+    }
+
 # === ПАРСИНГ ОТВЕТА МОДЕЛИ ===
+
+def parse_agent_response(text: str) -> tuple[list, str | None]:
+    """Разбирает ответ модели в пару (вызовы инструментов, финальный ответ).
+
+    Порядок попыток важен:
+
+    1. Ответ по схеме build_response_schema() — основной путь, когда
+       constrained decoding включён.
+    2. Свободный текст — фоллбэк через extract_tool_calls() для случаев,
+       когда сервер не поддерживает `format` или он выключен вручную.
+
+    Ровно один из элементов пары непустой.
+    """
+    try:
+        obj = json.loads(text)
+    except (json.JSONDecodeError, TypeError):
+        obj = None
+
+    if isinstance(obj, dict) and "action" in obj:
+        if obj["action"] == "tool_call" and obj.get("name"):
+            return [{"name": obj["name"], "arguments": obj.get("arguments", {})}], None
+        return [], (obj.get("answer") or "").strip()
+
+    # Фоллбэк: сервер без constrained decoding или отключённая схема
+    calls = extract_tool_calls(text)
+    if calls:
+        return calls, None
+    return [], text.strip()
 
 def extract_tool_calls(text: str) -> list:
     """
-    Извлекает вызовы инструментов из текста ответа модели.
+    Извлекает вызовы инструментов из свободного текста ответа модели.
     Ищет JSON-объекты вида {"name": "...", "arguments": {...}}.
+
+    ⚠️ Путь для совместимости, а не основной. Пока схема не передаётся
+    в `format`, разбор ответа остаётся угадыванием: модель может обернуть
+    JSON в markdown, добавить пояснение до и после, сломать кавычки.
+    Основной путь — parse_agent_response() поверх build_response_schema().
     """
     calls = []
 
