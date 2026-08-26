@@ -407,4 +407,4 @@ python -m chapter3.agent
 
 Это и есть точка входа в следующую главу.
 
-|[Назад](../chapter2/README.md) | [📚 Оглавление](../README.md) | Далее: Глава 4 (в работе)|
+|[Назад](../chapter2/README.md) | [📚 Оглавление](../README.md) | [Далее](../chapter4/README.md)|
