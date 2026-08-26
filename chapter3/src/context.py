@@ -10,7 +10,7 @@
 from collections.abc import Callable
 from typing import Any
 
-from .security import looks_like_instruction, sanitize_core_memory, sanitize_summary
+from .security import looks_like_instruction, sanitize_previous_session, sanitize_summary
 
 # ====================================================================
 # ПРОМПТ ДЛЯ СУММАРИЗАЦИИ
@@ -305,13 +305,13 @@ class Conversation:
         max_history_tokens: int = 1200,
         summarize_after_tokens: int | None = None,
         summarizer_fn: Callable[[list[dict[str, Any]]], str] | None = None,
-        core_memory: Any | None = None,
+        previous_session: Any | None = None,
     ):
         self.system_prompt = system_prompt
-        # Core-память передаётся объектом, а не текстом: блок читается в момент
-        # сборки сообщений. Иначе правка, сделанная агентом на первой итерации,
-        # стала бы видна ему только со следующей реплики пользователя.
-        self.core_memory = core_memory
+        # Пересказ прошлой сессии передаётся объектом, а не текстом: блок
+        # читается в момент сборки сообщений. Иначе пересказ, сохранённый
+        # при сжатии, стал бы виден модели только со следующей реплики.
+        self.previous_session = previous_session
         self.max_history_tokens = max_history_tokens
         # По умолчанию сжимаем, когда история переросла бюджет в полтора раза
         self.summarize_after_tokens = summarize_after_tokens or int(max_history_tokens * 1.5)
@@ -346,23 +346,23 @@ class Conversation:
     def build_messages(self, reminder: str | None = None) -> list[dict[str, Any]]:
         """Собирает список сообщений для отправки модели.
 
-        Порядок: системный промпт → core-память → резюме → свежая история →
-        напоминание. Он не случаен и выстроен по частоте изменений: промпт —
-        константа, core-блок правится изредка, резюме переписывается при
-        сжатии, история меняется каждую реплику. Ollama кэширует совпадающий
-        префикс контекста, и чем позже в списке стоит меняющееся, тем больше
-        prefill переиспользуется.
+        Порядок: системный промпт → предыдущая сессия → резюме → свежая
+        история → напоминание. Он не случаен и выстроен по частоте изменений:
+        промпт — константа, пересказ прошлой сессии переписывается раз в
+        сессию, резюме — при сжатии, история — каждую реплику. Ollama кэширует
+        совпадающий префикс контекста, и чем позже в списке стоит меняющееся,
+        тем больше prefill переиспользуется.
         """
         messages: list[dict[str, Any]] = [
             {"role": "system", "content": self.system_prompt}
         ]
 
-        if self.core_memory is not None:
+        if self.previous_session is not None:
             # Роль `user` и теги данных — по той же причине, что у резюме:
-            # текст блока пишет модель со слов пользователя.
-            block = self.core_memory.render()
+            # текст пересказа пишет модель со слов пользователя.
+            block = self.previous_session.render()
             if block:
-                messages.append({"role": "user", "content": sanitize_core_memory(block)})
+                messages.append({"role": "user", "content": sanitize_previous_session(block)})
 
         if self.summary:
             # Роль `user`, а НЕ `system`. Текст резюме сочинила модель по

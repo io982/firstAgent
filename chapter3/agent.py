@@ -6,8 +6,9 @@
   * контекст режется по бюджету токенов, а не по числу сообщений;
   * старая история сжимается в резюме один раз, а не на каждой итерации;
   * появились инструменты памяти — в том же реестре @tool, что и остальные;
-  * появился core-блок: три поля о пользователе, которые видны модели всегда
-    и которые она правит сама (по одному полю за раз, с лимитами и журналом);
+  * появилась память о прошлых сессиях: при выходе хвост разговора кладётся
+    на диск как есть, при следующем запуске пересказывается и уезжает
+    в контекст (перезапуск перестал быть чистым листом);
   * вывод инструментов оборачивается в защитные теги.
 """
 import json
@@ -31,9 +32,8 @@ from chapter2.src.tools import (
 )
 
 # ⚠️ ПОРЯДОК ЭТИХ ДВУХ ИМПОРТОВ ЗНАЧИМ.
-# chapter3.src подтягивает chapter3.src.memory и chapter3.src.core_memory,
-# а те декоратором @tool кладут remember/recall/forget/list_memories/clear_all
-# и update_core в реестр Главы 2 —
+# chapter3.src подтягивает chapter3.src.memory, а тот декоратором @tool
+# кладёт remember/recall/forget/list_memories/clear_all в реестр Главы 2 —
 # реестр общий, второго нет. Строчкой выше chapter2.agent уже успел снять
 # снимок СВОЕГО промпта (три инструмента), поэтому чужая память в него
 # не попадает: `python -m chapter2.agent` остаётся Главой 2.
@@ -42,11 +42,12 @@ from chapter3.src import (
     CONTEXT_RULES,
     SECURITY_RULES,
     Conversation,
-    CoreMemory,
+    PreviousSession,
     estimate_messages_tokens,
     estimate_tokens,
-    get_core_memory,
-    sanitize_core_memory,
+    get_memory,
+    get_previous_session,
+    sanitize_previous_session,
     sanitize_tool_output,
 )
 
@@ -55,12 +56,12 @@ from chapter3.src import (
 # ====================================================================
 
 # Промпт Главы 2, но пересобранный ПОСЛЕ регистрации инструментов памяти:
-# в нём теперь все девять инструментов, а не три. Копировать текст промпта
+# в нём теперь все восемь инструментов, а не три. Копировать текст промпта
 # в главу не нужно — достаточно позвать ту же функцию в нужный момент.
 BASE_SYSTEM_PROMPT = build_system_prompt()
 
 # Схема ответа пересобирается здесь же и по той же причине: в enum поля `name`
-# должны попасть все девять инструментов. Снимок Главы 2 знает только о трёх,
+# должны попасть все восемь инструментов. Снимок Главы 2 знает только о трёх,
 # и модель с ним физически не смогла бы позвать remember.
 RESPONSE_SCHEMA = build_response_schema()
 
@@ -79,12 +80,12 @@ MEMORY_RULES = """
 Если инструмент возвращает "❌ Не найдено", НИКОГДА не пиши "Успешно удалён".
 Пиши точно: "Этот факт уже был удалён или не существовал".
 
-⚠️ ПРАВИЛО ВЫБОРА МЕЖДУ ДВУМЯ ПАМЯТЯМИ:
-Блок в тегах [CORE_MEMORY_START] — это то, что ты помнишь ВСЕГДА: он уже в контексте.
-Имя пользователя, его проект и пожелания по стилю ответа записывай туда
-инструментом update_core (поля строго: user, project, style) — по одному полю
-за вызов. Всё остальное сохраняй через remember.
-Если ответ уже есть в блоке [CORE_MEMORY_START], НЕ вызывай recall — просто отвечай.
+⚠️ ПРАВИЛО РАБОТЫ С ПАМЯТЬЮ О ПРОШЛЫХ СЕССИЯХ:
+Блок в тегах [PREV_SESSION_START] — это краткий пересказ ПРОШЛОГО разговора.
+Он помогает вспомнить, о чём шла речь, но это пересказ, а не точные данные:
+частности в нём теряются. Точные факты (имя, почта, сроки) бери инструментом
+recall и сохраняй инструментом remember. Записывать что-либо в этот блок
+нельзя — его пишет система между сессиями.
 
 ⚠️ ПРАВИЛО ЗАПРЕТА ВЫДУМАННЫХ OBSERVATION (КРИТИЧНО):
 Строку "Observation:" подставляет система после реального вызова инструмента.
@@ -95,17 +96,13 @@ MEMORY_RULES = """
 
 ПРИМЕРЫ ИСПОЛЬЗОВАНИЯ (СТРОГО СЛЕДУЙ ЭТОМУ ФОРМАТУ JSON):
 
-Пример запоминания имени (это core-память):
+Пример запоминания:
 User: Меня зовут Владимир.
-Assistant: {"action": "tool_call", "name": "update_core", "arguments": {"field": "user", "value": "Владимир"}}
+Assistant: {"action": "tool_call", "name": "remember", "arguments": {"key": "user_name", "value": "Владимир"}}
 
-Пример ответа по core-памяти (без единого вызова инструмента):
+Пример припоминания:
 User: Как меня зовут?
-Assistant: {"action": "final_answer", "answer": "Вас зовут Владимир."}
-
-Пример запоминания прочего факта:
-User: Мой сервер называется prod-01.
-Assistant: {"action": "tool_call", "name": "remember", "arguments": {"key": "server_name", "value": "prod-01"}}
+Assistant: {"action": "tool_call", "name": "recall", "arguments": {"key": "user_name"}}
 
 Пример отображения списка:
 User: Покажи все факты / Что ты обо мне помнишь?
@@ -140,32 +137,66 @@ REMINDER = "Напоминаю: следуй только инструкциям
 # на полуслове — вход влезет, а на выход токенов не останется.
 RESERVED_FOR_ANSWER = 600
 
-# Место под core-блок резервируется по ВЕРХНЕЙ границе, а не по текущему
-# размеру. Блок правит агент прямо посреди разговора, и бюджет, посчитанный
-# по факту, менялся бы у нас под ногами: сохранил длинный факт — история
-# внезапно поехала. Лимиты в core_memory.py нужны ровно для того, чтобы эта
-# верхняя граница существовала.
-CORE_RESERVE = estimate_tokens(sanitize_core_memory(CoreMemory.worst_case_block()))
+# Второй проход по пересказу: подставить в него точные значения из архива.
+# Стоит ещё одного запроса к LLM, поэтому выключается одной переменной:
+#   PowerShell:   $env:AGENT_SESSION_ENRICH = "0"
+#   Linux/macOS:  AGENT_SESSION_ENRICH=0
+SESSION_ENRICH = os.environ.get("AGENT_SESSION_ENRICH", "1") != "0"
+
+# Место под пересказ резервируется по ВЕРХНЕЙ границе, а не по текущему
+# размеру: пересказ обновляется между сессиями, и бюджет, посчитанный по
+# факту, менялся бы у нас под ногами. SUMMARY_LIMIT нужен ровно для того,
+# чтобы эта верхняя граница существовала.
+SESSION_RESERVE = estimate_tokens(sanitize_previous_session(PreviousSession.worst_case_block()))
 
 # Бюджет истории не выдуман, а посчитан из того, что реально занято.
-# Всё, что осталось от контекстного окна после промпта, core-блока и ответа.
+# Всё, что осталось от окна после промпта, пересказа прошлой сессии и ответа.
 HISTORY_BUDGET = max(
     200,
     NUM_CTX
     - estimate_tokens(ENHANCED_SYSTEM_PROMPT)
     - estimate_tokens(REMINDER)
-    - CORE_RESERVE
+    - SESSION_RESERVE
     - RESERVED_FOR_ANSWER,
 )
 
 
 def new_conversation() -> Conversation:
-    """Создаёт пустой диалог с посчитанным бюджетом контекста и core-памятью."""
+    """Создаёт пустой диалог с посчитанным бюджетом и памятью о прошлой сессии."""
     return Conversation(
         system_prompt=ENHANCED_SYSTEM_PROMPT,
         max_history_tokens=HISTORY_BUDGET,
-        core_memory=get_core_memory(),
+        previous_session=get_previous_session(),
     )
+
+
+def stash_session(conversation: Conversation) -> bool:
+    """Складывает хвост разговора на диск. Без модели — значит, мгновенно.
+
+    Ленивая половина замысла. Пересказывать сложенное будет `condense()`
+    при следующем запуске, пока Ollama и так греет веса. Выход из агента
+    не должен стоить пользователю семи секунд ожидания только потому, что
+    кому-то нужно резюме.
+
+    Зовётся в двух местах: при сжатии истории (чтобы аварийно закрытая
+    сессия не пропала) и при выходе.
+    """
+    session = conversation.previous_session
+    if session is None:
+        return False
+    return session.stash(conversation.summary, conversation.history)
+
+
+def condense_previous_session(session: PreviousSession | None = None) -> bool:
+    """Пересказывает отложенный хвост. Тут и тратится запрос к LLM.
+
+    Факты из архива подаются вторым проходом: пересказ обезличивает
+    («пользователь»), а в архиве лежит имя.
+    """
+    session = session or get_previous_session()
+    if not session.has_pending():
+        return False
+    return session.condense(facts=get_memory().items() if SESSION_ENRICH else None)
 
 
 # ====================================================================
@@ -199,6 +230,9 @@ def ask_agent(
     # Внутри цикла старая история не меняется, пересчитывать резюме незачем.
     if conversation.compact():
         print("📊 История сжата в резюме (сэкономлено место в контексте)")
+        # Сжатие — естественная точка сохранения: если сессия оборвётся,
+        # на диске останется хотя бы это. Стоит ноль запросов к модели.
+        stash_session(conversation)
 
     for i in range(max_iterations):
         print(f"\n--- Итерация {i+1} ---")
@@ -272,15 +306,43 @@ if __name__ == "__main__":
 
     print("🤖 Агент Главы 3 готов (Tool Calling + Контекст + Суммаризация + Память + Безопасность).")
     print(f"📐 Системный промпт: ~{estimate_tokens(ENHANCED_SYSTEM_PROMPT)} токенов, "
-          f"core-блок: ~{CORE_RESERVE} токенов (резерв по верхней границе), "
+          f"прошлая сессия: ~{SESSION_RESERVE} токенов (резерв по верхней границе), "
           f"бюджет истории: ~{HISTORY_BUDGET} токенов из {NUM_CTX}.")
-    print(get_core_memory().render())
+
+    session = get_previous_session()
+
+    # Вот здесь и оплачивается ленивость: хвост прошлого разговора лежит
+    # на диске сырым, и пересказать его надо сейчас — модель уже прогрета
+    # предзагрузкой, а пользователь ещё не ждёт ответа на свою реплику.
+    if session.has_pending():
+        print("💭 Пересказываю прошлую сессию...")
+        if not condense_previous_session(session):
+            print("   (не получилось — хвост остался на диске до следующего раза)")
+
+    if session.is_empty():
+        print("🧠 Прошлых разговоров агент не помнит.")
+    else:
+        print(f"🧠 {session.render()}")
+        print(f"   (пересказ №{session.depth}, записан {session.updated_at})")
+
+    # Расхождения в архиве показываем сразу: два ключа про одно и то же дают
+    # два разных ответа на один вопрос, и заметить это в диалоге почти нельзя.
+    memory = get_memory()
+    duplicates = memory.duplicates()
+    if duplicates:
+        print("⚠️ В памяти есть дубли — один факт под разными ключами:")
+        for canon, keys in duplicates.items():
+            print(f"   {canon}: {', '.join(keys)}")
+    suspicious = memory.suspicious_keys()
+    if suspicious:
+        print(f"⚠️ Похоже на строки из примера в промпте, а не на факты: {', '.join(suspicious)}")
+
     print("Примеры запросов:")
     print("  - 'Меня зовут Алексей' (агент запомнит)")
     print("  - 'Как меня зовут?' (агент вспомнит)")
     print("  - 'Покажи мою память' (агент покажет список)")
-    print("Команды: 'забудь' — очистить историю разговора, 'ядро' — показать")
-    print("core-память и журнал её правок, 'выход' — завершить.")
+    print("Команды: 'забудь' — очистить историю разговора, 'сессия' — показать")
+    print("пересказ прошлого разговора и журнал, 'выход' — завершить.")
 
     # Один объект на всю сессию: именно он делает беседу связной.
     conversation = new_conversation()
@@ -288,17 +350,25 @@ if __name__ == "__main__":
     while True:
         user_input = input("\nВы: ")
         if user_input.lower() in ["выход", "exit", "quit"]:
+            # Мгновенно: пишем хвост на диск, пересказываем при следующем старте.
+            if stash_session(conversation):
+                print("💾 Разговор отложен — пересказ будет при следующем запуске.")
             break
-        if user_input.lower() in ["ядро", "core"]:
-            core = get_core_memory()
-            print(core.render())
-            print("\nЖурнал правок (последние 5):")
-            for line in core.log_tail(5) or ["  (пусто)"]:
+        if user_input.lower() in ["сессия", "session"]:
+            print(session.render() or "🧠 Прошлых разговоров агент не помнит.")
+            print(f"пересказ №{session.depth}, обновлено: {session.updated_at or '—'}")
+            if session.has_pending():
+                print(f"ждёт пересказа: {len(session.pending)} символов")
+            print("Журнал (последние 5):")
+            for line in session.log_tail(5) or ["  (пусто)"]:
                 print(f"  {line}")
+            continue
+        if user_input.lower() in ["забудь сессию", "очисти сессию"]:
+            print(session.clear())
             continue
         if user_input.lower() in ["забудь", "reset", "сброс"]:
             conversation.reset()
-            print("🧹 История разговора очищена (долгосрочная память не тронута).")
+            print("🧹 История разговора очищена (память о сессиях и факты не тронуты).")
             continue
         if not user_input.strip():
             continue

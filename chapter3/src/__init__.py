@@ -13,20 +13,19 @@ from .context import (
     trim_by_tokens,
     trim_history,
 )
-from .core_memory import (
-    BLOCK_LIMIT,
-    CORE_FIELDS,
-    FIELD_LIMIT,
-    CoreMemory,
-    get_core_memory,
-)
 from .memory import LongTermMemory, get_memory
+from .previous_session import (
+    SUMMARY_LIMIT,
+    PreviousSession,
+    enrich_with_facts,
+    get_previous_session,
+)
 from .security import (
     CONTEXT_RULES,
     INJECTION_PATTERNS,
     SECURITY_RULES,
     looks_like_instruction,
-    sanitize_core_memory,
+    sanitize_previous_session,
     sanitize_summary,
     sanitize_tool_output,
 )
@@ -44,16 +43,15 @@ __all__ = [
     "summarize_history",
     "sanitize_tool_output",
     "sanitize_summary",
-    "sanitize_core_memory",
+    "sanitize_previous_session",
     "looks_like_instruction",
     "INJECTION_PATTERNS",
     "CONTEXT_RULES",
     "SECURITY_RULES",
     "LongTermMemory",
     "get_memory",
-    "CoreMemory",
-    "get_core_memory",
-    "CORE_FIELDS",
-    "FIELD_LIMIT",
-    "BLOCK_LIMIT",
+    "PreviousSession",
+    "get_previous_session",
+    "enrich_with_facts",
+    "SUMMARY_LIMIT",
 ]

@@ -1,11 +1,15 @@
 __pycache__/
 chroma_db/
 chapter4/
+chapter4/index/
 chapter5/
 chapter6/
 chapter7/
 chapter8/
 README copy.md
 chapter3/memory.json
+chapter3/previous_session.json
+chapter3/previous_session.log
+# Остатки выброшенной core-памяти: файлы могли создаться до переделки
 chapter3/core_memory.json
 chapter3/core_memory.log

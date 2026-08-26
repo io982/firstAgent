@@ -27,6 +27,50 @@ LIST_TOTAL_LIMIT = 1500   # символов на весь список
 LIST_LINE_LIMIT = 200     # символов на одну строку «ключ: значение»
 
 
+# ====================================================================
+# ОДИН ФАКТ — ОДИН КЛЮЧ
+# ====================================================================
+# Реальный лог: в памяти лежит `user_name: io982`, а модель зовёт
+# `recall(key="user")` и получает «не найдено». Второй заход — и она кладёт
+# рядом `user: io`. Два ключа, два разных ответа на один вопрос, и агент
+# уверенно отвечает тем, который попался первым.
+#
+# Лечится не промптом, а нормализацией: ключ приводится к канону ДО записи
+# и ДО чтения. Тогда `имя`, `name`, `user` и `user_name` — это один факт.
+KEY_ALIASES: dict[str, tuple[str, ...]] = {
+    "user_name": ("name", "username", "user", "имя", "имя_пользователя", "как_зовут"),
+    "user_email": ("email", "mail", "e_mail", "почта", "электронная_почта"),
+}
+
+# Обратный индекс собирается один раз: синоним -> канонический ключ
+_ALIAS_TO_CANONICAL = {
+    alias: canonical
+    for canonical, aliases in KEY_ALIASES.items()
+    for alias in (canonical, *aliases)
+}
+
+# Ключи из few-shot примера в системном промпте. Модель однажды приняла
+# пример за данные и сохранила его в память как настоящий факт — это не
+# гипотеза, такие строки нашлись в боевом memory.json.
+PROMPT_EXAMPLE_KEYS = ("fact1", "fact2")
+
+
+def normalize_key(key: str) -> str:
+    """Приводит ключ к сравнимому виду: регистр, пробелы, дефисы."""
+    normalized = str(key).strip().lower()
+    for char in (" ", "-", ".", "/"):
+        normalized = normalized.replace(char, "_")
+    while "__" in normalized:
+        normalized = normalized.replace("__", "_")
+    return normalized.strip("_")
+
+
+def canonical_key(key: str) -> str:
+    """Канонический ключ факта: `имя`, `name`, `user` — всё это `user_name`."""
+    normalized = normalize_key(key)
+    return _ALIAS_TO_CANONICAL.get(normalized, normalized)
+
+
 class LongTermMemory:
     """
     Персистентное хранилище фактов.
@@ -78,8 +122,17 @@ class LongTermMemory:
         if not key or not isinstance(key, str):
             return "❌ Ошибка: ключ должен быть непустой строкой."
 
-        self._data[key] = value
+        stored_key = canonical_key(key)
+        if not stored_key:
+            return "❌ Ошибка: ключ должен быть непустой строкой."
+
+        self._data[stored_key] = value
         self._save()
+
+        if stored_key != key:
+            # Проговариваем подмену: иначе модель считает, что факт лежит под
+            # её ключом, и на следующем шаге не найдёт его.
+            return f"✅ Запомнил: {stored_key} = {value} (ключ '{key}' приведён к '{stored_key}')"
         return f"✅ Запомнил: {key} = {value}"
 
     def recall(self, key: str) -> str:
@@ -92,8 +145,9 @@ class LongTermMemory:
         Returns:
             Значение или сообщение об отсутствии.
         """
-        if key in self._data:
-            return f"📖 Найдено: {key} = {self._data[key]}"
+        stored_key = self._resolve(key)
+        if stored_key is not None:
+            return f"📖 Найдено: {stored_key} = {self._data[stored_key]}"
         return f"❌ Не найдено: {key}"
 
     def forget(self, key: str) -> str:
@@ -106,10 +160,11 @@ class LongTermMemory:
         Returns:
             Сообщение о результате операции.
         """
-        if key in self._data:
-            del self._data[key]
+        stored_key = self._resolve(key)
+        if stored_key is not None:
+            del self._data[stored_key]
             self._save()
-            return f"🗑️ Забыл: {key}"
+            return f"🗑️ Забыл: {stored_key}"
         return f"❌ Не найдено: {key}"
 
     def list_memories(self) -> str:
@@ -148,6 +203,45 @@ class LongTermMemory:
                 f"в контекст. Доставай их по ключу через recall]"
             )
         return result
+
+    def _resolve(self, key: str) -> str | None:
+        """Находит настоящий ключ факта: точный, потом канонический.
+
+        Точное совпадение проверяется первым — в памяти могли остаться ключи,
+        записанные до нормализации, и терять их из-за неё было бы обидно.
+        """
+        if key in self._data:
+            return key
+        target = canonical_key(key)
+        for stored in self._data:
+            if canonical_key(stored) == target:
+                return stored
+        return None
+
+    def duplicates(self) -> dict[str, list[str]]:
+        """Ключи, которые означают одно и то же: {канон: [ключи]}.
+
+        Нормализация закрывает будущие записи, но старые файлы уже разъехались.
+        Показать расхождение — работа для человека, автоматически «починить»
+        такое нельзя: неизвестно, какое из двух значений верное.
+        """
+        groups: dict[str, list[str]] = {}
+        for key in self._data:
+            groups.setdefault(canonical_key(key), []).append(key)
+        return {canon: keys for canon, keys in groups.items() if len(keys) > 1}
+
+    def suspicious_keys(self) -> list[str]:
+        """Факты, похожие на строки из few-shot примера, а не на данные."""
+        return [key for key in self._data if normalize_key(key) in PROMPT_EXAMPLE_KEYS]
+
+    def items(self) -> dict[str, Any]:
+        """Возвращает копию всех фактов.
+
+        В отличие от list_memories(), здесь нет ни потолков, ни форматирования:
+        это данные для кода, а не текст для модели. Копия, а не сам словарь —
+        чтобы посторонний код не менял память в обход remember/forget.
+        """
+        return dict(self._data)
 
     def clear_all(self) -> str:
         """Очищает всю память."""
