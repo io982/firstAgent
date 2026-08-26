@@ -306,12 +306,17 @@ class Conversation:
         summarize_after_tokens: int | None = None,
         summarizer_fn: Callable[[list[dict[str, Any]]], str] | None = None,
         previous_session: Any | None = None,
+        resume: bool = False,
     ):
         self.system_prompt = system_prompt
         # Пересказ прошлой сессии передаётся объектом, а не текстом: блок
         # читается в момент сборки сообщений. Иначе пересказ, сохранённый
         # при сжатии, стал бы виден модели только со следующей реплики.
         self.previous_session = previous_session
+        # ...но в контекст он по умолчанию НЕ уезжает. Объект нужен всегда —
+        # чтобы было куда сохранить разговор на выходе; а место в каждом
+        # запросе пересказ занимает, только когда человек об этом попросил.
+        self.resume = resume
         self.max_history_tokens = max_history_tokens
         # По умолчанию сжимаем, когда история переросла бюджет в полтора раза
         self.summarize_after_tokens = summarize_after_tokens or int(max_history_tokens * 1.5)
@@ -339,6 +344,25 @@ class Conversation:
 
     # ---------------------------------------------------------------- чтение
 
+    def set_history_budget(self, max_history_tokens: int) -> None:
+        """Меняет бюджет истории посреди разговора.
+
+        Нужен ровно в одном случае: человек попросил вспомнить прошлую сессию,
+        и в контексте появился блок, которого там не было. Место под него надо
+        у кого-то отнять — отнимаем у истории, честно и сразу, а не постфактум
+        при первом переполнении.
+
+        Порог сжатия едет следом за бюджетом, сохраняя пропорцию: иначе
+        сжатие либо перестанет срабатывать, либо начнёт срабатывать на каждой
+        реплике.
+        """
+        if self.max_history_tokens > 0:
+            ratio = self.summarize_after_tokens / self.max_history_tokens
+        else:
+            ratio = 1.5
+        self.max_history_tokens = max_history_tokens
+        self.summarize_after_tokens = int(max_history_tokens * ratio)
+
     def history_tokens(self) -> int:
         """Оценка веса истории в токенах."""
         return estimate_messages_tokens(self.history)
@@ -357,7 +381,7 @@ class Conversation:
             {"role": "system", "content": self.system_prompt}
         ]
 
-        if self.previous_session is not None:
+        if self.previous_session is not None and self.resume:
             # Роль `user` и теги данных — по той же причине, что у резюме:
             # текст пересказа пишет модель со слов пользователя.
             block = self.previous_session.render()

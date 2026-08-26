@@ -81,7 +81,8 @@ MEMORY_RULES = """
 Пиши точно: "Этот факт уже был удалён или не существовал".
 
 ⚠️ ПРАВИЛО РАБОТЫ С ПАМЯТЬЮ О ПРОШЛЫХ СЕССИЯХ:
-Блок в тегах [PREV_SESSION_START] — это краткий пересказ ПРОШЛОГО разговора.
+Если в контексте есть блок в тегах [PREV_SESSION_START] — это краткий пересказ
+ПРОШЛОГО разговора; когда блока нет, значит, прошлое в этот раз не поднимали.
 Он помогает вспомнить, о чём шла речь, но это пересказ, а не точные данные:
 частности в нём теряются. Точные факты (имя, почта, сроки) бери инструментом
 recall и сохраняй инструментом remember. Записывать что-либо в этот блок
@@ -150,24 +151,60 @@ SESSION_ENRICH = os.environ.get("AGENT_SESSION_ENRICH", "1") != "0"
 SESSION_RESERVE = estimate_tokens(sanitize_previous_session(PreviousSession.worst_case_block()))
 
 # Бюджет истории не выдуман, а посчитан из того, что реально занято.
-# Всё, что осталось от окна после промпта, пересказа прошлой сессии и ответа.
+# Бюджетов два, потому что пересказ прошлой сессии в контексте не всегда.
 HISTORY_BUDGET = max(
     200,
     NUM_CTX
     - estimate_tokens(ENHANCED_SYSTEM_PROMPT)
     - estimate_tokens(REMINDER)
-    - SESSION_RESERVE
     - RESERVED_FOR_ANSWER,
 )
 
+# Тот же расчёт, но с местом под пересказ. Переключение между ними —
+# в resume_session(), в тот момент, когда человек попросил вспомнить прошлое.
+HISTORY_BUDGET_RESUMED = max(200, HISTORY_BUDGET - SESSION_RESERVE)
 
-def new_conversation() -> Conversation:
-    """Создаёт пустой диалог с посчитанным бюджетом и памятью о прошлой сессии."""
+
+def new_conversation(resume: bool = False) -> Conversation:
+    """Создаёт пустой диалог с посчитанным бюджетом.
+
+    Объект памяти о прошлых сессиях привязывается всегда — в него будет
+    сохранён этот разговор. А вот в контекст пересказ по умолчанию не идёт:
+    место в каждом запросе он занимает, а нужен далеко не в каждом разговоре.
+    """
     return Conversation(
         system_prompt=ENHANCED_SYSTEM_PROMPT,
-        max_history_tokens=HISTORY_BUDGET,
+        max_history_tokens=HISTORY_BUDGET_RESUMED if resume else HISTORY_BUDGET,
         previous_session=get_previous_session(),
+        resume=resume,
     )
+
+
+def resume_session(conversation: Conversation) -> bool:
+    """Берёт прошлый разговор в контекст. Зовётся по просьбе человека.
+
+    Почему человек, а не модель: чтобы позвать инструмент «вспомни прошлую
+    сессию», модель должна догадаться, что он ей нужен. Маленькая модель
+    не догадывается — она отвечает по тому, что видит перед собой. Поэтому
+    решение принимает тот, кто точно знает, продолжает он вчерашний разговор
+    или начинает новый.
+
+    Здесь же оплачивается пересказ: если на диске лежит несжатый хвост,
+    он пересказывается сейчас, а не при каждом запуске агента.
+    """
+    session = conversation.previous_session or get_previous_session()
+
+    if session.has_pending():
+        print("💭 Пересказываю прошлую сессию...")
+        condense_previous_session(session)
+
+    if session.is_empty():
+        return False
+
+    conversation.previous_session = session
+    conversation.resume = True
+    conversation.set_history_budget(HISTORY_BUDGET_RESUMED)
+    return True
 
 
 def stash_session(conversation: Conversation) -> bool:
@@ -306,24 +343,19 @@ if __name__ == "__main__":
 
     print("🤖 Агент Главы 3 готов (Tool Calling + Контекст + Суммаризация + Память + Безопасность).")
     print(f"📐 Системный промпт: ~{estimate_tokens(ENHANCED_SYSTEM_PROMPT)} токенов, "
-          f"прошлая сессия: ~{SESSION_RESERVE} токенов (резерв по верхней границе), "
-          f"бюджет истории: ~{HISTORY_BUDGET} токенов из {NUM_CTX}.")
+          f"бюджет истории: ~{HISTORY_BUDGET} токенов из {NUM_CTX} "
+          f"(~{HISTORY_BUDGET_RESUMED}, если поднять прошлую сессию).")
 
     session = get_previous_session()
 
-    # Вот здесь и оплачивается ленивость: хвост прошлого разговора лежит
-    # на диске сырым, и пересказать его надо сейчас — модель уже прогрета
-    # предзагрузкой, а пользователь ещё не ждёт ответа на свою реплику.
-    if session.has_pending():
-        print("💭 Пересказываю прошлую сессию...")
-        if not condense_previous_session(session):
-            print("   (не получилось — хвост остался на диске до следующего раза)")
-
-    if session.is_empty():
+    # Прошлое не подставляем молча: показываем, что оно есть, и ждём просьбы.
+    # Пересказ при этом ещё не сделан — за него платят только те, кому он нужен.
+    if session.is_empty() and not session.has_pending():
         print("🧠 Прошлых разговоров агент не помнит.")
     else:
-        print(f"🧠 {session.render()}")
-        print(f"   (пересказ №{session.depth}, записан {session.updated_at})")
+        known = session.summary or "разговор ещё не пересказан"
+        print(f"🧠 Есть прошлый разговор: {known[:100]}...")
+        print("   Наберите 'продолжить', чтобы взять его в контекст.")
 
     # Расхождения в архиве показываем сразу: два ключа про одно и то же дают
     # два разных ответа на один вопрос, и заметить это в диалоге почти нельзя.
@@ -341,19 +373,31 @@ if __name__ == "__main__":
     print("  - 'Меня зовут Алексей' (агент запомнит)")
     print("  - 'Как меня зовут?' (агент вспомнит)")
     print("  - 'Покажи мою память' (агент покажет список)")
-    print("Команды: 'забудь' — очистить историю разговора, 'сессия' — показать")
-    print("пересказ прошлого разговора и журнал, 'выход' — завершить.")
+    print("Команды: 'продолжить' — поднять прошлый разговор, 'сессия' — показать")
+    print("пересказ и журнал, 'забудь' — очистить историю, 'выход' — завершить.")
 
     # Один объект на всю сессию: именно он делает беседу связной.
-    conversation = new_conversation()
+    # AGENT_RESUME=1 — для тех, кому прошлое нужно всегда, без команды.
+    conversation = new_conversation(resume=os.environ.get("AGENT_RESUME", "0") == "1")
+    if conversation.resume and not resume_session(conversation):
+        print("🧠 Поднимать нечего: прошлых разговоров нет.")
 
     while True:
         user_input = input("\nВы: ")
         if user_input.lower() in ["выход", "exit", "quit"]:
-            # Мгновенно: пишем хвост на диск, пересказываем при следующем старте.
+            # Мгновенно: пишем хвост на диск, пересказываем при следующей просьбе.
             if stash_session(conversation):
-                print("💾 Разговор отложен — пересказ будет при следующем запуске.")
+                print("💾 Разговор отложен — пересказ будет, когда попросите его поднять.")
             break
+        if user_input.lower() in ["продолжить", "resume", "continue"]:
+            if conversation.resume:
+                print("🧠 Прошлый разговор уже в контексте.")
+            elif resume_session(conversation):
+                print(f"🧠 {session.render()}")
+                print(f"📐 Бюджет истории уменьшен до ~{conversation.max_history_tokens} токенов.")
+            else:
+                print("🧠 Поднимать нечего: прошлых разговоров нет.")
+            continue
         if user_input.lower() in ["сессия", "session"]:
             print(session.render() or "🧠 Прошлых разговоров агент не помнит.")
             print(f"пересказ №{session.depth}, обновлено: {session.updated_at or '—'}")

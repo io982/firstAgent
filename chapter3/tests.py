@@ -17,10 +17,12 @@ from chapter2.src.tools import TOOL_REGISTRY, execute_tool
 from chapter3.agent import (
     ENHANCED_SYSTEM_PROMPT,
     HISTORY_BUDGET,
+    HISTORY_BUDGET_RESUMED,
     RESERVED_FOR_ANSWER,
     SESSION_RESERVE,
     ask_agent,
     new_conversation,
+    resume_session,
     stash_session,
 )
 from chapter3.src.context import (
@@ -1099,6 +1101,38 @@ class TestPreviousSession:
 
         assert session.summary.startswith("Обсуждали")
 
+    def test_summary_in_a_foreign_script_is_rejected(self, session):
+        """Живой случай: на втором круге пересказа модель съехала в китайский."""
+        session.save("В прошлый раз обсуждали режим питания.")
+
+        result = session.save(
+            "io обсуждал своё имя, планы на锻炼, режим питания.",
+            chained=True,
+            source="io обсуждал своё имя, планы на тренировки, режим питания.",
+        )
+
+        assert "чужого алфавита" in result
+        assert "锻炼" not in session.summary
+        assert "режим питания" in session.summary   # прежний пересказ на месте
+
+    def test_foreign_script_from_the_conversation_is_kept(self, session):
+        """Если человек сам обсуждал иероглифы, они имеют право остаться."""
+        result = session.save(
+            "Пользователь разбирал иероглиф 锻炼 и спрашивал про перевод.",
+            source="как перевести 锻炼?",
+        )
+
+        assert "💾" in result
+        assert "锻炼" in session.summary
+
+    def test_condense_keeps_the_tail_when_the_script_switches(self, session):
+        """Пересказ отклонён — хвост остаётся ждать следующей попытки."""
+        session.stash("", [{"role": "user", "content": "Обсуждали режим питания"}])
+
+        assert session.condense(summarizer_fn=lambda m: "Пользователь обсуждал 锻炼.") is False
+        assert session.has_pending()
+        assert session.is_empty()
+
     def test_state_survives_a_restart(self, tmp_path):
         first = PreviousSession(storage_path=tmp_path / "p.json", log_path=tmp_path / "p.log")
         first.save("Разговор был про обрезку контекста и бюджет токенов.")
@@ -1141,14 +1175,14 @@ class TestPreviousSessionInContext:
         return session
 
     def test_block_is_the_second_message(self, session):
-        messages = Conversation(system_prompt="SYS", previous_session=session).build_messages()
+        messages = Conversation(system_prompt="SYS", previous_session=session, resume=True).build_messages()
 
         assert messages[0]["role"] == "system"
         assert "Ollama" in messages[1]["content"]
 
     def test_block_is_data_not_a_system_instruction(self, session):
         """Тот же вывод, что и для резюме: текст блока сочинила модель."""
-        block = Conversation(system_prompt="SYS", previous_session=session).build_messages()[1]
+        block = Conversation(system_prompt="SYS", previous_session=session, resume=True).build_messages()[1]
 
         assert block["role"] == "user"
         assert "[PREV_SESSION_START" in block["content"]
@@ -1156,13 +1190,14 @@ class TestPreviousSessionInContext:
 
     def test_empty_session_adds_no_message(self, tmp_path):
         empty = PreviousSession(storage_path=tmp_path / "e.json", log_path=tmp_path / "e.log")
-        conv = Conversation(system_prompt="SYS", previous_session=empty)
+        conv = Conversation(system_prompt="SYS", previous_session=empty, resume=True)
 
         assert conv.build_messages() == [{"role": "system", "content": "SYS"}]
 
     def test_block_survives_trimming(self, session):
         """Обрезка режет историю; пересказ в неё не входит и потеряться не может."""
-        conv = Conversation(system_prompt="SYS", max_history_tokens=50, previous_session=session)
+        conv = Conversation(system_prompt="SYS", max_history_tokens=50, previous_session=session,
+                            resume=True)
         for i in range(50):
             conv.add("user", f"реплика номер {i} " + "текст " * 20)
 
@@ -1171,7 +1206,7 @@ class TestPreviousSessionInContext:
 
     def test_new_save_is_visible_immediately(self, session):
         """Блок читается в момент сборки, а не запоминается при создании диалога."""
-        conv = Conversation(system_prompt="SYS", previous_session=session)
+        conv = Conversation(system_prompt="SYS", previous_session=session, resume=True)
         assert "векторн" not in conv.build_messages()[1]["content"]
 
         session.save("Теперь разговор был про векторные базы.", chained=True)
@@ -1183,20 +1218,90 @@ class TestPreviousSessionInContext:
 
         assert conv.build_messages() == [{"role": "system", "content": "SYS"}]
 
-    def test_budget_reserves_room_for_the_block(self):
-        """Резерв по верхней границе — бюджет не должен «плавать» по ходу сессии."""
-        spent = (
-            estimate_tokens(ENHANCED_SYSTEM_PROMPT)
-            + SESSION_RESERVE
-            + HISTORY_BUDGET
-            + RESERVED_FOR_ANSWER
-        )
-        assert SESSION_RESERVE > 0
-        assert spent <= NUM_CTX
+    def test_both_budgets_fit_the_window(self):
+        """Бюджета два: без пересказа в контексте и с ним. Оба должны влезать."""
+        prompt = estimate_tokens(ENHANCED_SYSTEM_PROMPT)
+
+        assert prompt + HISTORY_BUDGET + RESERVED_FOR_ANSWER <= NUM_CTX
+        assert prompt + SESSION_RESERVE + HISTORY_BUDGET_RESUMED + RESERVED_FOR_ANSWER <= NUM_CTX
+        assert HISTORY_BUDGET_RESUMED < HISTORY_BUDGET  # за пересказ платит история
 
     def test_worst_case_block_fits_the_reserve(self):
         block = sanitize_previous_session(PreviousSession.worst_case_block())
         assert estimate_tokens(block) <= SESSION_RESERVE
+
+
+class TestResumeOnDemand:
+    """Прошлая сессия попадает в контекст только по просьбе человека."""
+
+    @pytest.fixture
+    def session(self, tmp_path, monkeypatch):
+        from chapter3.src import previous_session as session_module
+
+        session = session_module.PreviousSession(
+            storage_path=tmp_path / "p.json", log_path=tmp_path / "p.log"
+        )
+        monkeypatch.setattr(session_module, "_session_instance", session)
+        return session
+
+    def test_block_is_absent_until_asked(self, session):
+        """Место в каждом запросе пересказ занимает не по умолчанию."""
+        session.save("В прошлый раз обсуждали настройку Ollama.")
+        conv = new_conversation()
+
+        assert conv.build_messages() == [
+            {"role": "system", "content": ENHANCED_SYSTEM_PROMPT}
+        ]
+
+    def test_resume_adds_the_block_and_shrinks_the_budget(self, session):
+        session.save("В прошлый раз обсуждали настройку Ollama.")
+        conv = new_conversation()
+        assert conv.max_history_tokens == HISTORY_BUDGET
+
+        assert resume_session(conv) is True
+
+        assert "Ollama" in conv.build_messages()[1]["content"]
+        assert conv.max_history_tokens == HISTORY_BUDGET_RESUMED
+
+    def test_compaction_threshold_follows_the_budget(self, session):
+        """Порог сжатия едет за бюджетом, иначе сжатие сломается в одну из сторон."""
+        session.save("В прошлый раз обсуждали настройку Ollama.")
+        conv = new_conversation()
+        ratio = conv.summarize_after_tokens / conv.max_history_tokens
+
+        resume_session(conv)
+
+        assert conv.summarize_after_tokens == int(conv.max_history_tokens * ratio)
+
+    def test_pending_tail_is_condensed_on_demand(self, session):
+        """Пересказ делается в момент просьбы, а не при каждом запуске агента."""
+        session.stash("", [{"role": "user", "content": "Чиню индексацию каталога"}])
+        conv = new_conversation()
+        conv.summarizer_fn = lambda m: "Пользователь чинил индексацию каталога."
+
+        with patch("chapter3.agent.condense_previous_session") as condense:
+            condense.side_effect = lambda s: s.condense(
+                summarizer_fn=lambda m: "Пользователь чинил индексацию каталога."
+            )
+            assert resume_session(conv) is True
+
+        assert "индексацию" in session.summary
+        assert not session.has_pending()
+
+    def test_nothing_to_resume(self, session):
+        conv = new_conversation()
+
+        assert resume_session(conv) is False
+        assert conv.resume is False
+        assert conv.max_history_tokens == HISTORY_BUDGET
+
+    def test_conversation_is_saved_even_without_resume(self, session):
+        """Не подняли прошлое — разговор всё равно должен сохраниться."""
+        conv = new_conversation()
+        conv.add("user", "Чиню индексацию каталога deliveries")
+
+        assert stash_session(conv) is True
+        assert session.has_pending()
 
 
 class TestStashAndCondense:
@@ -1228,7 +1333,7 @@ class TestStashAndCondense:
         assert "реплика 0 " not in session.pending
 
     def test_nothing_to_stash_returns_false(self, session):
-        conv = Conversation(system_prompt="SYS", previous_session=session)
+        conv = Conversation(system_prompt="SYS", previous_session=session, resume=True)
 
         assert stash_session(conv) is False
 
@@ -1343,6 +1448,18 @@ class TestEnrichCore:
         assert enrich_with_facts(
             summary, {"user_name": "Аркадий"}, model_fn=lambda m: "Аркадий. " * 40
         ) == summary
+
+    def test_foreign_script_answer_is_rejected(self):
+        """Второй проход тоже не имеет права менять письменность пересказа."""
+        summary = "Пользователь чинил индексацию каталога deliveries."
+
+        enriched = enrich_with_facts(
+            summary,
+            {"user_name": "Аркадий"},
+            model_fn=lambda m: "Аркадий чинил индексацию каталога 目录 deliveries.",
+        )
+
+        assert enriched == summary
 
     def test_broken_model_does_not_break_the_save(self):
         summary = "Пользователь чинил индексацию каталога deliveries."
@@ -1496,7 +1613,7 @@ class TestIntegrationWithRealModel:
         Тест сторожит смысл всего уровня: если пересказ перестанет попадать
         в контекст, агент ответит «не знаю» — до этой версии так и было.
         """
-        from chapter3.agent import ask_agent, new_conversation
+        from chapter3.agent import ask_agent, new_conversation, resume_session
         from chapter3.src.previous_session import get_previous_session
 
         get_previous_session().save(
@@ -1504,7 +1621,11 @@ class TestIntegrationWithRealModel:
             "и жаловался на дубли записей."
         )
 
-        answer = ask_agent("О чём мы говорили в прошлый раз?", conversation=new_conversation())
+        # Пересказ поднимается по просьбе человека — в тесте эту роль играем мы
+        conversation = new_conversation()
+        assert resume_session(conversation) is True
+
+        answer = ask_agent("О чём мы говорили в прошлый раз?", conversation=conversation)
 
         assert "deliver" in answer.lower() or "дубл" in answer.lower(), (
             f"Агент не увидел пересказ прошлой сессии. Ответ: {answer[:200]}"
