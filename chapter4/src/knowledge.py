@@ -147,7 +147,7 @@ class KnowledgeBase:
         store: VectorStore | None = None,
         docs_dir: Path | str | None = None,
     ):
-        self.store = store if store is not None else get_store()
+        self.store = store if store is not None else get_store(name="docs")
         self.docs_dir = Path(docs_dir) if docs_dir else DEFAULT_DOCS_DIR
 
     # ------------------------------------------------------------ индексация

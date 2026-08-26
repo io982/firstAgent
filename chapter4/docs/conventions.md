@@ -51,5 +51,5 @@ Ollama в CI нет, поэтому там проверяется только �
 - `AGENT_STRUCTURED=0` — выключить constrained decoding.
 - `AGENT_MCP` — подключить инструменты с MCP-сервера.
 - `AGENT_EMBED_MODEL` — модель эмбеддингов, по умолчанию `nomic-embed-text`.
-- `AGENT_VECTOR_STORE` — хранилище векторов: `memory` или `chroma`.
+- `AGENT_VECTOR_STORE` — хранилище векторов: `chroma` по умолчанию, `memory` — перебор в памяти.
 - `AGENT_DOCS_DIR` — папка с документами для базы знаний.

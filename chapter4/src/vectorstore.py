@@ -32,19 +32,24 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(
 
 from .embeddings import dot
 
-# Куда MemoryVectorStore кладёт индекс. Внутри главы, а не в корне проекта:
-# индекс — производная от документов, его не жалко удалить и пересобрать.
-DEFAULT_INDEX_PATH = Path(__file__).parent.parent / "index" / "knowledge.json"
-
-# Куда ChromaDB кладёт свою базу. Папка уже в .gitignore.
+# Куда ChromaDB кладёт свою базу. Папка уже в .gitignore: индекс —
+# производная от документов, его не жалко удалить и пересобрать.
 CHROMA_PERSIST_DIR = Path(__file__).parent.parent.parent / "chroma_db"
 
-DEFAULT_COLLECTION = "chapter4_docs"
+# Куда MemoryVectorStore кладёт свой JSON, если его попросят сохраниться.
+INDEX_DIR = Path(__file__).parent.parent / "index"
 
-# Какое хранилище используется по умолчанию:
-#   PowerShell:   $env:AGENT_VECTOR_STORE = "chroma"
-#   Linux/macOS:  export AGENT_VECTOR_STORE=chroma
-DEFAULT_BACKEND = os.environ.get("AGENT_VECTOR_STORE", "memory")
+# Префикс коллекций Главы 4 в общей базе Chroma. Он нужен: в chroma_db
+# может лежать что угодно ещё, а имена коллекций там плоские.
+COLLECTION_PREFIX = "chapter4_"
+
+# Какое хранилище используется по умолчанию. Chroma — настоящая база:
+# бинарные векторы, инкрементальная запись, HNSW-индекс при росте корпуса.
+# Перебор в JSON остаётся под рукой, чтобы посмотреть, как это устроено
+# внутри, и чтобы тесты не трогали диск:
+#   PowerShell:   $env:AGENT_VECTOR_STORE = "memory"
+#   Linux/macOS:  export AGENT_VECTOR_STORE=memory
+DEFAULT_BACKEND = os.environ.get("AGENT_VECTOR_STORE", "chroma")
 
 
 @dataclass
@@ -124,7 +129,7 @@ class MemoryVectorStore(VectorStore):
     поэтому косинус здесь — просто скалярное произведение.
     """
 
-    def __init__(self, persist_path: Path | str | None = DEFAULT_INDEX_PATH):
+    def __init__(self, persist_path: Path | str | None = None):
         self.persist_path = Path(persist_path) if persist_path else None
         self._records: dict[str, dict[str, Any]] = {}
         if self.persist_path:
@@ -235,7 +240,7 @@ class ChromaVectorStore(VectorStore):
 
     def __init__(
         self,
-        collection: str = DEFAULT_COLLECTION,
+        collection: str = f"{COLLECTION_PREFIX}docs",
         persist_dir: Path | str = CHROMA_PERSIST_DIR,
     ):
         try:
@@ -331,11 +336,21 @@ class ChromaVectorStore(VectorStore):
 # ВЫБОР ХРАНИЛИЩА
 # ====================================================================
 
-def get_store(backend: str | None = None, **kwargs: Any) -> VectorStore:
-    """Создаёт хранилище по имени: "memory" (по умолчанию) или "chroma"."""
+def get_store(backend: str | None = None, name: str = "docs", **kwargs: Any) -> VectorStore:
+    """Создаёт хранилище для корпуса `name`: "chroma" (по умолчанию) или "memory".
+
+    Корпусов в главе два — документы и факты, — и жить они должны врозь:
+    в одной коллекции короткая строка «сервер: prod-01» конкурировала бы
+    с абзацем документации, а потолок выдачи у них разный.
+
+    Имя корпуса превращается в имя коллекции Chroma или в имя JSON-файла —
+    звать хранилище отсюда одинаково, независимо от того, что под ним.
+    """
     backend = (backend or DEFAULT_BACKEND).lower()
     if backend == "memory":
+        kwargs.setdefault("persist_path", INDEX_DIR / f"{name}.json")
         return MemoryVectorStore(**kwargs)
     if backend == "chroma":
+        kwargs.setdefault("collection", f"{COLLECTION_PREFIX}{name}")
         return ChromaVectorStore(**kwargs)
     raise ValueError(f"Неизвестное хранилище: {backend}. Доступны: memory, chroma")

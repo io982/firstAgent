@@ -40,6 +40,7 @@ from chapter4.agent import (
 )
 from chapter4.src import embeddings as embeddings_module
 from chapter4.src import tools as tools_module
+from chapter4.src import vectorstore as vectorstore_module
 from chapter4.src.chunking import (
     CHUNK_SIZE,
     MIN_CHUNK,
@@ -583,6 +584,24 @@ class TestStoreFactory:
     def test_unknown_backend_is_an_error(self):
         with pytest.raises(ValueError, match="Неизвестное хранилище"):
             get_store("postgres")
+
+    def test_real_database_is_the_default(self):
+        """Индекс живёт в настоящей базе, а не в JSON: перебор — учебный запасной путь."""
+        if os.environ.get("AGENT_VECTOR_STORE"):
+            pytest.skip("хранилище задано переменной окружения")
+        assert vectorstore_module.DEFAULT_BACKEND == "chroma"
+
+    def test_corpus_name_decides_where_data_lands(self):
+        """Документы и факты — разные корпуса, и смешивать их нельзя."""
+        docs = get_store("memory", name="docs")
+        facts = get_store("memory", name="facts")
+        assert docs.persist_path != facts.persist_path
+        assert docs.persist_path.name == "docs.json"
+        assert facts.persist_path.name == "facts.json"
+
+    def test_chroma_collections_are_namespaced(self):
+        """В chroma_db может лежать что угодно ещё — имена коллекций там плоские."""
+        assert vectorstore_module.COLLECTION_PREFIX.startswith("chapter4")
 
 
 class TestChromaVectorStore:

@@ -43,19 +43,18 @@ nomic-embed-text заметно хуже сопоставляет тексты �
 import hashlib
 import os
 import sys
-from pathlib import Path
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from chapter3.src.memory import LongTermMemory, get_memory
 
 from .embeddings import embed_documents, embed_query
-from .vectorstore import Hit, MemoryVectorStore, VectorStore
+from .vectorstore import Hit, VectorStore, get_store
 
-# Индекс фактов лежит отдельно от индекса документов: это разные корпуса
-# с разным временем жизни. Документы переиндексируются редко и целиком,
+# Имя корпуса. Факты живут отдельно от документов — это разные корпуса
+# с разным временем жизни: документы переиндексируются редко и целиком,
 # факты меняются посреди разговора по одному.
-DEFAULT_FACTS_INDEX = Path(__file__).parent.parent / "index" / "facts.json"
+FACTS_CORPUS = "facts"
 
 # Три кандидата. Строки «ключ: значение» короткие, и три штуки стоят
 # в контексте дешевле одного абзаца документа, но выбирать из пяти
@@ -90,7 +89,7 @@ class SemanticMemory:
         store: VectorStore | None = None,
     ):
         self.memory = memory if memory is not None else get_memory()
-        self.store = store if store is not None else MemoryVectorStore(DEFAULT_FACTS_INDEX)
+        self.store = store if store is not None else get_store(name=FACTS_CORPUS)
 
     # ------------------------------------------------------------ сверка
 
