@@ -382,11 +382,38 @@ class TestChunking:
         sections = split_sections("Преамбула\n\n# Раздел\n\nтело")
         assert sections[0] == ("", "Преамбула")
 
-    def test_heading_goes_inside_the_chunk(self):
+    def test_breadcrumb_goes_inside_the_chunk(self):
         """Фрагмент должен отвечать на вопрос без соседей, которых рядом нет."""
         chunk = chunk_text(DOC_ONE, "context.md")[0]
-        assert chunk.text.startswith("Контекст\n")
+        assert chunk.text.startswith("context.md › Контекст\n")
         assert chunk.heading == "Контекст"
+
+    def test_file_name_is_searchable_because_it_is_in_the_text(self):
+        """Имя файла в метаданных не ищется: ищем мы по тексту чанка.
+
+        Без этого вопрос «что в agent.txt» находил чужой файл со строками
+        вида AGENT_MODEL — замер описан в докстроке chunk_text.
+        """
+        for chunk in chunk_text(DOC_ONE, "agent.txt"):
+            assert "agent.txt" in chunk.text
+
+    def test_document_without_headings_still_names_its_file(self):
+        chunk = chunk_text("Просто текст без единого заголовка.", "plain.txt")[0]
+        assert chunk.text.startswith("plain.txt\n")
+
+    def test_hash_is_a_heading_only_in_markdown(self):
+        """В исходнике на Python решётка — комментарий, а не заголовок."""
+        code = "# ====================\n# НАСТРОЙКИ\n# ====================\n\nMODEL = 'qwen'\n"
+        assert split_sections(code, markdown=False) == [("", code.strip())]
+        assert [heading for heading, _ in split_sections(code)] != [""]
+
+    def test_extension_decides_whether_headings_are_parsed(self, tmp_path):
+        code = "# =========\n\nMODEL = 'qwen'\n"
+        (tmp_path / "agent.txt").write_text(code, encoding="utf-8")
+        (tmp_path / "notes.md").write_text("# Раздел\n\nтекст раздела\n", encoding="utf-8")
+
+        assert chunk_file(tmp_path / "agent.txt", root=tmp_path)[0].heading == ""
+        assert chunk_file(tmp_path / "notes.md", root=tmp_path)[0].heading == "Раздел"
 
     def test_chunks_respect_the_size_limit(self):
         text = "\n\n".join(f"Абзац номер {i}. " * 12 for i in range(20))
@@ -618,6 +645,45 @@ class TestIndexing:
         assert report.added == 0
         assert report.unchanged == report.chunks
         assert len(fake_embeddings["batches"]) == before
+
+    def test_new_file_is_picked_up_without_restart(self, knowledge, docs_dir):
+        """Файл, положенный в папку при живом агенте, виден следующей сверке."""
+        knowledge.index()
+
+        (docs_dir / "extra.md").write_text(
+            "# Ещё один\n\nНовый документ, которого при первой сверке не было.\n",
+            encoding="utf-8",
+        )
+        report = knowledge.index()
+
+        assert report.files == 3
+        assert report.added > 0
+        assert "extra.md" in knowledge.stats()["sources"]
+
+    def test_deleted_file_leaves_the_index(self, knowledge, docs_dir):
+        """Удалили документ — агент больше не должен по нему отвечать."""
+        knowledge.index()
+        (docs_dir / "rules.md").unlink()
+
+        report = knowledge.index()
+
+        assert report.files == 1
+        assert report.removed > 0
+        assert "rules.md" not in knowledge.stats()["sources"]
+
+    def test_indexing_a_single_file_touches_only_it(self, knowledge, docs_dir):
+        """Сверка одного файла не имеет права чистить остальной корпус.
+
+        Права судить о чужих фрагментах у неё нет: остальные файлы в этот
+        раз просто не смотрели.
+        """
+        knowledge.index()
+        before = knowledge.stats()["sources"]["rules.md"]
+
+        report = knowledge.index(path=docs_dir / "context.md")
+
+        assert report.files == 1
+        assert knowledge.stats()["sources"]["rules.md"] == before
 
     def test_edited_file_drops_its_old_chunks(self, knowledge, docs_dir):
         knowledge.index()
@@ -1142,6 +1208,42 @@ class TestAutoRag:
             pytest.skip("автопоиск выключен переменной окружения")
         assert agent_module.AUTO_RAG
 
+    @pytest.mark.parametrize("text", [
+        "какое контекстное окно у агента?",
+        "Как оформлять README главы?",
+        "где написано про модели",
+        "расскажи про пороги близости",
+        "сколько фрагментов в базе",
+    ])
+    def test_questions_are_worth_a_search(self, text):
+        assert agent_module.looks_like_request(text)
+
+    @pytest.mark.parametrize("text", [
+        "меня зовут io982",
+        "мой сервер называется prod-01",
+        "привет",
+        "спасибо, помогло",
+        "дедлайн проекта 15 сентября",
+    ])
+    def test_statements_are_not_searched(self, text):
+        """Подложить документы к «меня зовут io982» — значит потерять память.
+
+        Замер и разбор — в докстроке looks_like_request.
+        """
+        assert not agent_module.looks_like_request(text)
+
+    def test_statement_clears_the_previous_fragments(self, isolated_state, docs_dir):
+        from chapter4.src.knowledge import get_knowledge_base
+
+        base = get_knowledge_base()
+        base.docs_dir = docs_dir
+        base.index()
+
+        conversation = new_conversation()
+        assert augment_with_context(conversation, "какое контекстное окно у агента?")
+        assert not augment_with_context(conversation, "меня зовут io982")
+        assert conversation.retrieved == ""
+
     def test_fragments_reach_the_model_on_the_first_call(
         self, isolated_state, docs_dir, monkeypatch
     ):
@@ -1155,7 +1257,7 @@ class TestAutoRag:
 
         answer = json.dumps({"action": "final_answer", "answer": "готово"})
         with patch("chapter4.agent.request_model", return_value=answer) as request:
-            ask_agent("контекстное окно токенов", conversation=new_conversation())
+            ask_agent("какое контекстное окно у агента?", conversation=new_conversation())
 
         messages = request.call_args[0][0]
         assert any("TOOL_OUTPUT_START" in message["content"] for message in messages)
@@ -1170,18 +1272,53 @@ class TestAutoRag:
         base.index()
 
         conversation = new_conversation()
-        conversation.add("user", "контекстное окно токенов")
-        assert augment_with_context(conversation, "контекстное окно токенов")
+        conversation.add("user", "какое контекстное окно у агента?")
+        assert augment_with_context(conversation, "какое контекстное окно у агента?")
 
-        added = conversation.history[-1]
-        assert added["role"] == "user"
-        assert "TOOL_OUTPUT_START" in added["content"]
-        assert "context.md" in added["content"]
+        # Найденное живёт отдельно от разговора и в историю не попадает:
+        # иначе фрагменты копятся там от реплики к реплике и вытесняют
+        # сам разговор (замер — в available_history_budget).
+        assert conversation.history == [
+            {"role": "user", "content": "какое контекстное окно у агента?"}
+        ]
+        assert "context.md" in conversation.retrieved
+
+        block = conversation.build_messages(reminder="Напоминание")[-2]
+        assert block["role"] == "user"
+        assert "TOOL_OUTPUT_START" in block["content"]
+        assert "context.md" in block["content"]
+
+    def test_previous_fragments_do_not_survive_the_next_question(
+        self, isolated_state, docs_dir
+    ):
+        """Справка к позапрошлому вопросу — тот же мусор, что и устаревший чанк."""
+        from chapter4.src.knowledge import get_knowledge_base
+
+        base = get_knowledge_base()
+        base.docs_dir = docs_dir
+        base.index()
+
+        conversation = new_conversation()
+        augment_with_context(conversation, "какое контекстное окно у агента?")
+        assert conversation.retrieved
+
+        base.clear()
+        assert not augment_with_context(conversation, "что угодно")
+        assert conversation.retrieved == ""
+
+    def test_retrieved_block_shrinks_the_history_budget(self, isolated_state):
+        """Найденное занимает место честно: бюджет истории уменьшается на его вес."""
+        conversation = new_conversation()
+        full = conversation.available_history_budget()
+
+        conversation.retrieved = "x" * 2000
+        assert conversation.available_history_budget() == full - 1000
 
     def test_nothing_found_adds_nothing(self, isolated_state):
         conversation = new_conversation()
         assert not augment_with_context(conversation, "вопрос")
         assert conversation.history == []
+        assert conversation.retrieved == ""
 
     def test_broken_search_does_not_break_the_reply(self, isolated_state, broken_embeddings):
         from chapter4.src.knowledge import get_knowledge_base
@@ -1332,24 +1469,41 @@ class TestRealAgent:
 
     @pytest.mark.timeout(180)
     def test_answers_from_the_knowledge_base(self):
-        # Число спрашивается такое, которого модель знать не может: оно есть
-        # только в корпусе главы. Ответ «8192» доказывает, что сработал поиск,
-        # а не память обучения.
+        # Спрашиваем то, чего модель знать не может: имя переменной окружения
+        # придумано этим курсом и живёт только в корпусе главы. Ответ по делу
+        # доказывает, что сработал поиск, а не память обучения.
         answer = ask_agent(
-            "Какое контекстное окно у агента в Главе 4?", conversation=new_conversation()
+            "Как выключить constrained decoding?", conversation=new_conversation()
         )
-        assert "8192" in answer
+        assert "AGENT_STRUCTURED" in answer.upper()
+
+    @pytest.mark.timeout(120)
+    def test_answer_is_in_the_retrieved_fragments(self):
+        """Проверка самого поиска, отдельно от того, как модель перескажет.
+
+        Разделение неслучайно: сквозной тест выше падает и когда поиск
+        промахнулся, и когда модель ответила своими словами. Этот отвечает
+        ровно на один вопрос — доехал ли ответ до контекста.
+        """
+        from chapter4.src.knowledge import get_knowledge_base
+
+        context = get_knowledge_base().retrieve(
+            "Какое контекстное окно у агента?", budget_tokens=RETRIEVAL_BUDGET
+        )
+        assert "8192" in context
 
     @pytest.mark.timeout(180)
     def test_says_it_does_not_know(self):
         answer = ask_agent(
             "Какой у проекта адрес офиса в Берлине?", conversation=new_conversation()
         )
+        # Главное — чтобы адреса не появилось. Форму отказа не фиксируем:
+        # модель говорит то «в документах этого нет», то «проект не
+        # предоставляет», и тест на список формулировок ловил бы не
+        # выдумку, а стиль ответа.
         assert not re.search(r"[Бб]ерлин\w*,\s*\w+штрассе", answer)
-        assert any(
-            marker in answer.lower()
-            for marker in ("нет", "не найден", "не указан", "не знаю")
-        )
+        assert not re.search(r"\d+\s*[,-]\s*\d{4,}", answer)
+        assert re.search(r"\bнет\b|\bне\s", answer.lower()), answer
 
     @pytest.mark.timeout(180)
     def test_search_result_fits_the_budget(self):

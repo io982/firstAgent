@@ -114,18 +114,24 @@ def normalize_text(text: str) -> str:
     return text.strip()
 
 
-def split_sections(text: str) -> list[tuple[str, str]]:
+def split_sections(text: str, markdown: bool = True) -> list[tuple[str, str]]:
     """Разбивает markdown на разделы по заголовкам.
 
     Возвращает пары (заголовок, тело). Заголовок — путь из вложенных
     заголовков через « › », чтобы «Ограничения» из одного раздела не
     выглядели в выдаче так же, как «Ограничения» из другого.
+
+    `markdown=False` — для файлов, где решётка означает не заголовок.
+    Проверено на исходнике из Главы 1, положенном в корпус под именем
+    `agent.txt`: строки-разделители `# =====================` разобрались
+    как заголовки, и в выдаче у фрагментов вместо темы стояли ряды знаков
+    равенства. Разметка — свойство формата, а не текста вообще.
     """
     text = normalize_text(text)
     if not text:
         return []
 
-    matches = list(HEADING_RE.finditer(text))
+    matches = list(HEADING_RE.finditer(text)) if markdown else []
     if not matches:
         return [("", text)]
 
@@ -210,19 +216,31 @@ def chunk_text(
     source: str,
     chunk_size: int = CHUNK_SIZE,
     overlap: int = CHUNK_OVERLAP,
+    markdown: bool = True,
 ) -> list[Chunk]:
     """Режет текст документа на чанки.
 
     Порядок: разделы → абзацы → набор абзацев до лимита → перекрытие.
-    Заголовок раздела дописывается в начало каждого чанка: фрагмент должен
-    отвечать на вопрос сам по себе, без соседей, которых рядом не будет.
+
+    В начало каждого чанка дописывается «хлебная крошка» — имя файла и путь
+    заголовков. Фрагмент должен отвечать на вопрос сам по себе, без соседей,
+    которых рядом не будет, а имя файла — часть ответа.
+
+    Имя файла попало в текст не сразу, и вот замер, который его туда привёл.
+    Пока в тексте был только заголовок, вопрос «что в agent.txt» находил
+    список переменных окружения из conventions.md (близость 0.770) — просто
+    потому, что там много строк вида `AGENT_MODEL`. Ни один из сорока чанков
+    самого agent.txt в тройку не попадал: имя файла жило в метаданных, а
+    ищем мы по тексту. С крошкой тот же вопрос находит нужный файл (0.810),
+    и остальные четыре проверочных вопроса отвечаются как раньше.
     """
     chunks: list[Chunk] = []
     position = 0
 
-    for heading, body in split_sections(text):
-        prefix = f"{heading}\n" if heading else ""
-        # Заголовок занимает место внутри чанка, значит на текст его остаётся
+    for heading, body in split_sections(text, markdown=markdown):
+        breadcrumb = f"{source} › {heading}" if heading else source
+        prefix = f"{breadcrumb}\n"
+        # Крошка занимает место внутри чанка, значит на текст его остаётся
         # меньше. Без этой поправки чанки с длинным путём заголовков вылезают
         # за лимит — незаметно, потому что считается он до склейки.
         body_limit = max(MIN_CHUNK, chunk_size - len(prefix))
@@ -274,7 +292,8 @@ def chunk_file(path: Path | str, root: Path | str | None = None) -> list[Chunk]:
         return []
 
     source = str(path.relative_to(root)) if root else path.name
-    return chunk_text(text, source.replace("\\", "/"))
+    # Заголовки ищем только там, где они действительно заголовки.
+    return chunk_text(text, source.replace("\\", "/"), markdown=path.suffix.lower() == ".md")
 
 
 def iter_documents(

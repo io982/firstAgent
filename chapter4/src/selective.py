@@ -36,6 +36,7 @@ from chapter3.src.context import (
     is_observation,
     trim_by_tokens,
 )
+from chapter3.src.security import sanitize_tool_output
 
 from .embeddings import EmbeddingError, cosine_similarity, embed_documents, embed_query
 
@@ -73,13 +74,34 @@ class SelectiveConversation(Conversation):
         # без неё «агент почему-то забыл» невозможно отличить от «эмбеддинги
         # не считаются» — оба выглядят одинаково.
         self.last_fallback: str = ""
+        # Найденное к ТЕКУЩЕЙ реплике. Живёт здесь, а не в истории, и это
+        # не мелочь — см. available_history_budget() ниже.
+        self.retrieved: str = ""
+
+    def available_history_budget(self) -> int:
+        """Сколько токенов остаётся разговору после найденного.
+
+        Первая версия клала найденное прямо в историю обычным сообщением.
+        Выглядело логично и сломалось на третьей реплике: каждый вызов
+        добавлял ~1250 токенов фрагментов, которые оставались там навсегда.
+        Замер на четырёх репликах — вес истории 1834 → 3334 → 4649 → 5976
+        при бюджете 4246. К третьей реплике разговор был вытеснен
+        документами: на «меня зовут io982» агент ответил «в базе знаний нет
+        информации о том, что вас так зовут» и не сохранил имя, хотя на
+        свежем диалоге сохраняет.
+
+        Отсюда правило: найденное — это не часть разговора, а справка
+        к текущему вопросу. Оно пересобирается каждую реплику, в историю
+        не попадает и своё место в бюджете занимает честно — вычитанием.
+        """
+        return max(200, self.max_history_tokens - estimate_tokens(self.retrieved))
 
     def select_history(self) -> list[dict[str, Any]]:
         """Отбирает сообщения истории под бюджет: свежие + релевантные старые."""
         if not self.history:
             return []
 
-        budget = self.max_history_tokens
+        budget = self.available_history_budget()
 
         # Всё влезает — отбирать нечего, это самый частый случай.
         if estimate_messages_tokens(self.history) <= budget:
@@ -156,6 +178,13 @@ class SelectiveConversation(Conversation):
             self.history = full_history
 
         messages.extend(self.select_history())
+
+        if self.retrieved:
+            # После истории и перед напоминанием: фрагменты относятся
+            # к последней реплике, и стоять они должны рядом с ней.
+            # Роль `user` и теги данных — по той же причине, что у резюме
+            # и у пересказа прошлой сессии: это внешний текст, не инструкция.
+            messages.append({"role": "user", "content": sanitize_tool_output(self.retrieved)})
 
         if reminder:
             messages.append({"role": "system", "content": reminder})
