@@ -110,6 +110,7 @@ chapters = [
     "chapter2/tests.py",
     "chapter3/tests.py",
     "chapter4/tests.py",
+    "chapter5/tests.py",
 ]
 
 failed = []
