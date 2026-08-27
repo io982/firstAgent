@@ -1326,7 +1326,7 @@ class TestAutoRag:
         assert conversation.retrieved == ""
 
     def test_retrieved_block_shrinks_the_history_budget(self, isolated_state):
-        """Найденное занимает место честно: бюджет истории уменьшается на его вес."""
+        """Найденное занимает место по-настоящему: бюджет истории уменьшается на его вес."""
         conversation = new_conversation()
         full = conversation.available_history_budget()
 
