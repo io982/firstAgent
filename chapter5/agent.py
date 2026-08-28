@@ -69,6 +69,8 @@ from chapter4.src import (
     set_retrieval_budget,
 )
 from chapter5.src import (
+    LANGUAGES,
+    NAMED_FILES,
     expand_query,
     get_code_index,
     get_project_map,
@@ -208,12 +210,23 @@ def budget_report() -> str:
 CODE_MARKERS = (
     "код", "функци", "класс", "метод", "модул", "импорт", "исходник",
     "реализов", "определ", "строк", "переменн", "константа", "аргумент",
-    "параметр", "возвраща", "вызыва", "зависимост", "структур",
+    "параметр", "возвраща", "вызыва", "зависимост", "структур", "лицензи",
     "def ", "class ", "import ",
 )
 
-# Упоминание файла: `agent.py`, `chapter4/src/knowledge.py`.
-FILE_MENTION = re.compile(r"[\w./\\-]+\.(py|js|ts|tsx|jsx|md|toml|ini|cfg|ya?ml|json)\b")
+# Упоминание файла: `agent.py`, `chapter4/src/knowledge.py`, `.gitignore`,
+# `LICENSE`. Список расширений и имён берётся из индексатора, а не пишется
+# здесь заново: разъехавшись, они дают файл, который в индексе есть, а в
+# вопросе не узнаётся. Так и вышло с `.gitignore` и `LICENSE` — вопрос про
+# них уезжал в документы и получал пересказ всей базы знаний вместо ответа.
+FILE_MENTION = re.compile(
+    r"[\w./\\-]*(?:"
+    + "|".join(
+        re.escape(name)
+        for name in sorted(list(LANGUAGES) + list(NAMED_FILES), key=len, reverse=True)
+    )
+    + r")\b"
+)
 
 # Слово, похожее на имя из кода: snake_case, CamelCase, latin с подчёркиванием.
 IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]{2,}")
@@ -276,7 +289,20 @@ def looks_like_code_question(text: str) -> bool:
         if token in project.symbols or project.resolve_module(token):
             return True
 
-    return any(resolve_language(word) for word in WORD.findall(text))
+    if any(resolve_language(word) for word in WORD.findall(text)):
+        return True
+
+    # Имя файла проекта, названное без расширения: «License посмотри»,
+    # «что в gitignore». Регулярное выражение выше такое не ловит — ловит
+    # карта, потому что список файлов у неё уже есть.
+    #
+    # Признак срабатывает только вместе с просьбой показать или перечислить.
+    # Без этого условия «Как оформлять README главы?» — вопрос про правила
+    # курса — уезжал в код только потому, что файл README.md существует.
+    if not (matches(lowered, LISTING_MARKERS) or matches(lowered, READ_MARKERS)):
+        return False
+
+    return any(project.files_matching(word) for word in WORD.findall(text))
 
 
 # Вопросы, у которых ответ лежит не в тексте файлов, а в разборе: граф
@@ -312,7 +338,7 @@ LISTING_MARKERS = (
 # похожие фрагменты, инструмент не зовёт и пересказывает соседние файлы.
 READ_MARKERS = (
     "прочитай", "прочти", "read file", "покажи содержимое", "открой файл",
-    "содержимое файла",
+    "содержимое файла", "посмотри",
 )
 
 # Реплика-продолжение: «а в chapter5?». Своих признаков у неё нет — только
@@ -374,7 +400,7 @@ MEMORY_MARKERS = (
     ("что", "меня"),
     "как меня зовут", "моё имя", "мое имя", "мой возраст", "мою почту",
     "моя почта", "мой email", "мой сервер", "мой проект",
-    "моего", "моей", "моих", "мою",
+    "моего", "моей", "моих", "мою", "зовут",
     "что я говорил", "обо мне", "вспомни", "что ты знаешь про меня",
     # По-английски спрашивают реже, но спрашивают: курс русский, а привычка
     # печатать латиницей никуда не девается.
@@ -411,11 +437,21 @@ STATEMENT_MARKERS = (
 )
 
 
+# Вопросительные слова. «Меня зовут io982» и «как меня зовут» отличаются
+# ровно ими: общая часть у реплик одна, а делать с ними надо разное —
+# записать факт или показать записанное.
+QUESTION_WORDS = (
+    "как ", "что ", "чем ", "сколько", "кто ", "какой", "какая", "какие",
+    "где ", "когда", "почему", "зачем", "покажи", "расскажи", "напомни",
+)
+
+
 def looks_like_fact_statement(text: str) -> bool:
     """Похожа ли реплика на факт о пользователе, а не на вопрос."""
-    if "?" in text:
+    lowered = f" {text.lower().strip()} "
+    if "?" in text or matches(lowered, QUESTION_WORDS):
         return False
-    return matches(f" {text.lower().strip()} ", STATEMENT_MARKERS)
+    return matches(lowered, STATEMENT_MARKERS)
 
 
 def augment_with_memory(conversation: SelectiveConversation, user_input: str) -> str:
@@ -434,18 +470,19 @@ def augment_with_memory(conversation: SelectiveConversation, user_input: str) ->
 
     lowered = f" {user_input.lower().strip()} "
 
-    # Порядок важен: «как меня зовут» — вопрос, «меня зовут io982» —
-    # утверждение, и общая часть у них одна. Вопрос проверяется первым.
+    # Утверждение о пользователе: не искать, а записать. В контекст едет
+    # не справка, а прямое указание — фрагменты тут только мешают.
+    # Проверяется ПЕРВЫМ: «меня зовут io982» подходит и под маркеры
+    # вопросов о пользователе тоже, а делать с ним надо другое.
+    if looks_like_fact_statement(user_input):
+        conversation.retrieved = (
+            "Эта реплика сообщает ФАКТ О ПОЛЬЗОВАТЕЛЕ. Ничего не ищи: "
+            "сначала вызови remember и запиши факт (ключ — по-русски, "
+            "словами), и только потом отвечай."
+        )
+        return "память"
+
     if not matches(lowered, MEMORY_MARKERS):
-        # Утверждение о пользователе: не искать, а записать. В контекст едет
-        # не справка, а прямое указание — фрагменты тут только мешают.
-        if looks_like_fact_statement(user_input):
-            conversation.retrieved = (
-                "Эта реплика сообщает ФАКТ О ПОЛЬЗОВАТЕЛЕ. Ничего не ищи: "
-                "сначала вызови remember и запиши факт (ключ — по-русски, "
-                "словами), и только потом отвечай."
-            )
-            return "память"
         return ""
 
     facts = get_memory().items()
@@ -520,6 +557,15 @@ def augment_with_structure(conversation: SelectiveConversation, user_input: str)
     )
     if matches(lowered, LISTING_MARKERS) or follow_up:
         listing = listing_answer(project, user_input)
+        if listing and "определений в нём нет" in listing:
+            # Файл есть, определений в нём нет — значит спрашивают про его
+            # содержимое: так устроены `.gitignore`, `LICENSE`, конфиги.
+            # Ответ «определений нет» человеку бесполезен, а модель
+            # достраивает его выдумкой про «внешние инструкции».
+            content = file_content(project, user_input)
+            if content:
+                conversation.retrieved = content
+                return "содержимое файла"
         if listing:
             conversation.retrieved = f"Определения по разбору кода:\n\n{listing}"
             return "список определений"
@@ -588,6 +634,7 @@ def listing_targets(user_input: str, project) -> list[str]:
     # расширений, и findall вернул бы «py» вместо «chapter4/src/tools.py».
     targets += [match.group(0) for match in FILE_MENTION.finditer(user_input)]
     targets += [word for word in WORD.findall(user_input) if resolve_language(word)]
+    targets += [word for word in WORD.findall(user_input) if project.files_matching(word)]
     targets += [
         candidate
         for candidate in MODULE_MENTION.findall(user_input) + IDENTIFIER.findall(user_input)
@@ -604,14 +651,17 @@ def file_content(project, user_input: str) -> str:
     прогон: «read file ./__init__.py» → пересказ трёх чужих файлов с
     выдуманными классами. Проще положить настоящее содержимое.
     """
-    for match in FILE_MENTION.finditer(user_input):
-        files = project.files_matching(match.group(0))
+    # Сначала имена с расширением или путём, потом голые слова: «LICENSE»,
+    # «gitignore». Порядок от точного к расплывчатому, как и в перечислении.
+    named = [match.group(0) for match in FILE_MENTION.finditer(user_input)]
+    for candidate in named + WORD.findall(user_input):
+        files = project.files_matching(candidate)
         if not files:
             continue
         if len(files) > 1:
             listed = ", ".join(sorted(files)[:5])
             return (
-                f"Под «{match.group(0)}» подходит {len(files)} файлов: {listed}. "
+                f"Под «{candidate}» подходит {len(files)} файлов: {listed}. "
                 f"Попроси пользователя уточнить, какой именно, — не угадывай."
             )
         source = files[0]

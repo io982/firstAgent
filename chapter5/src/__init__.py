@@ -35,6 +35,7 @@ from .codechunks import (
 from .languages import (
     LANGUAGES,
     MAX_FILE_BYTES,
+    NAMED_FILES,
     SKIP_DIRS,
     gitignore_dirs,
     iter_sources,
@@ -72,6 +73,7 @@ from .tools import (
 __all__ = [
     # обход репозитория
     "LANGUAGES",
+    "NAMED_FILES",
     "SKIP_DIRS",
     "MAX_FILE_BYTES",
     "language_of",

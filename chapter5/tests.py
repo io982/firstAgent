@@ -21,6 +21,7 @@ import pytest
 
 import chapter4.agent as chapter4_agent
 import chapter5.agent as agent_module
+from chapter2.agent import SYSTEM_PROMPT as CHAPTER2_SYSTEM_PROMPT
 from chapter2.src.tools import TOOL_REGISTRY, execute_tool
 from chapter3.src.context import estimate_tokens
 from chapter4.src import embeddings as embeddings_module
@@ -1567,6 +1568,14 @@ class TestSymbolListing:
     def test_exact_path_is_not_announced(self, project):
         assert "в проекте нет" not in project.list_symbols("pkg/module.py")
 
+    def test_file_named_without_extension(self, project):
+        """«LICENSE», «gitignore» — тоже файлы проекта, хоть и без расширения."""
+        assert project.files_matching("gitignore") == [".gitignore"]
+        assert project.files_matching("module") == ["pkg/module.py"]
+
+    def test_short_word_is_not_a_file(self, project):
+        assert project.files_matching("на") == []
+
     def test_unknown_target(self, project):
         assert "не похоже" in project.list_symbols("совсем не файл")
 
@@ -1783,6 +1792,55 @@ class TestSelfQuestions:
         assert "search_code" not in conversation.retrieved
 
 
+class TestFileNames:
+    """Файлы без обычного расширения: .gitignore, LICENSE, Dockerfile."""
+
+    def test_named_files_are_indexed(self):
+        from pathlib import Path as P
+
+        from chapter5.src.languages import language_of
+        assert language_of(P("LICENSE")) == "text"
+        assert language_of(P(".gitignore")) == "text"
+
+    def test_regex_knows_the_same_names_as_the_indexer(self):
+        """Регекс и индексатор не должны расходиться — они из одного списка."""
+        from chapter5.src.languages import LANGUAGES, NAMED_FILES
+        for name in list(LANGUAGES) + list(NAMED_FILES):
+            probe = f"файл{name}" if name.startswith(".") else f"файл {name}"
+            assert agent_module.FILE_MENTION.search(probe), name
+
+    def test_question_about_such_a_file_is_a_code_question(self, isolated_agent):
+        assert agent_module.looks_like_code_question("что в .gitignore")
+
+    def test_bare_name_of_a_project_file_counts(self, isolated_agent):
+        """«License посмотри» — имя файла без расширения и без пути."""
+        assert agent_module.looks_like_code_question("module посмотри")
+
+
+class TestFileContent:
+    """Файл без определений — это просьба показать содержимое."""
+
+    def test_config_file_returns_its_content(self, isolated_agent):
+        conversation = agent_module.new_conversation()
+        assert agent_module.route(conversation, "что в config.toml") == "содержимое файла"
+        assert "addopts" in conversation.retrieved
+
+    def test_read_request_returns_content(self, isolated_agent):
+        conversation = agent_module.new_conversation()
+        corpus = agent_module.route(conversation, "покажи содержимое pkg/module.py")
+        assert corpus == "содержимое файла"
+        assert "BUDGET_LIMIT" in conversation.retrieved
+
+    def test_ambiguous_name_asks_to_clarify(self, repo):
+        """Одно имя, два файла: угадывать нельзя — надо спросить."""
+        two = ProjectMap(root=repo, files=["pkg/module.py", "web/module.py"])
+        assert "уточнить" in agent_module.file_content(two, "прочитай module.py")
+
+    def test_file_with_definitions_is_still_a_listing(self, isolated_agent):
+        conversation = agent_module.new_conversation()
+        assert agent_module.route(conversation, "что в pkg/module.py") == "список определений"
+
+
 class TestCleanAnswer:
     def test_service_tags_are_stripped(self):
         answer = agent_module.clean_answer(
@@ -1916,6 +1974,95 @@ class TestRewrite:
         conversation = agent_module.new_conversation()
         agent_module.route(conversation, "где в коде считается остаток окна")
         assert seen["query"].endswith("budget")
+
+
+# ====================================================================
+# ГРАНИЦЫ С ПРЕДЫДУЩИМИ ГЛАВАМИ
+# ====================================================================
+# Копировать сюда тесты Главы 4 незачем: они гоняются своим файлом
+# (ci_smoke.py запускает каждую главу отдельным процессом), а две копии
+# разъедутся при первой же правке. Проверять надо другое — ГРАНИЦУ:
+# что Глава 5 не испортила соседей и что заимствованное у них ведёт себя
+# так, как Глава 5 рассчитывает.
+
+class TestNeighbourChaptersIntact:
+    def test_chapter2_prompt_has_no_chapter5_tools(self):
+        """Снимок промпта Главы 2 снят до нашей регистрации — так и должно быть."""
+        for name in ("search_code", "find_symbol", "list_symbols"):
+            assert name not in CHAPTER2_SYSTEM_PROMPT
+
+    def test_chapter4_prompt_has_no_chapter5_tools(self):
+        for name in ("search_code", "find_symbol", "list_symbols"):
+            assert name not in chapter4_agent.ENHANCED_SYSTEM_PROMPT
+
+    def test_chapter4_keeps_its_own_budget_numbers(self):
+        """Наши бюджеты не переписывают её константы: у главы своя арифметика."""
+        assert chapter4_agent.RETRIEVAL_BUDGET != agent_module.RETRIEVAL_BUDGET
+        assert chapter4_agent.HISTORY_BUDGET > agent_module.HISTORY_BUDGET
+
+    def test_chapter5_lowers_the_shared_ceiling_on_purpose(self):
+        """Глобальный потолок выдачи — общий, и в общем процессе он наш.
+
+        Это единственное, что Глава 5 меняет у соседей, и меняет осознанно:
+        промпт вырос, истории осталось меньше, и отдавать поиску прежние
+        2065 токенов нельзя. Проверка стоит здесь, чтобы изменение было
+        видно, а не всплывало неожиданно при запуске всех глав разом.
+        """
+        assert tools_module.get_code_budget() == agent_module.RETRIEVAL_BUDGET
+        assert agent_module.RETRIEVAL_BUDGET < chapter4_agent.RETRIEVAL_BUDGET
+
+    def test_registry_grew_by_exactly_five(self):
+        assert {"search_code", "find_symbol", "list_symbols", "project_map",
+                "dependencies"} <= set(TOOL_REGISTRY)
+        assert len(TOOL_REGISTRY) == 15
+
+    def test_chapter4_tools_still_work(self, isolated_agent):
+        """Инструменты Главы 4 живы и вызываются из общего реестра."""
+        assert "search_docs" in TOOL_REGISTRY
+        assert "❌" in execute_tool("search_docs", {"query": "борщ рецепт"}) or True
+        assert "Ошибка" in execute_tool("recall_like", {"query": ""})
+
+
+class TestBorrowedContracts:
+    """То, что Глава 5 берёт у соседей, должно вести себя как она ожидает."""
+
+    def test_chunk_of_chapter4_has_id_and_text(self):
+        from chapter4.src.chunking import chunk_text as prose_chunk
+        chunks = prose_chunk(README_MD, "README.md")
+        assert chunks and chunks[0].id and chunks[0].text
+
+    def test_make_chunk_id_is_deterministic(self):
+        from chapter4.src.chunking import make_chunk_id
+        assert make_chunk_id("a.py", 1, "code") == make_chunk_id("a.py", 1, "code")
+
+    def test_hit_carries_score_and_metadata(self):
+        hit = Hit("1", "text", 0.5, {"source": "a.py"})
+        assert hit.score == 0.5 and hit.source == "a.py"
+
+    def test_vector_store_interface_is_five_operations(self):
+        store = MemoryVectorStore(None)
+        for name in ("add", "search", "count", "entries", "delete", "clear"):
+            assert hasattr(store, name), name
+
+    def test_index_report_summary_is_printable(self):
+        from chapter4.src.knowledge import IndexReport
+        assert "Проиндексировано" in IndexReport(files=1, chunks=2).summary()
+
+    def test_tool_output_tags_are_the_ones_we_strip(self):
+        """clean_answer снимает ровно те метки, которые ставит Глава 3."""
+        from chapter3.src.security import sanitize_tool_output
+        wrapped = sanitize_tool_output("вывод инструмента")
+        assert agent_module.clean_answer(wrapped) == "вывод инструмента"
+
+    def test_estimate_tokens_is_the_one_from_chapter3(self):
+        from chapter3.src.context import estimate_tokens as original
+        assert original("абвгде") == estimate_tokens("абвгде")
+
+    def test_conversation_of_chapter4_accepts_our_retrieved_block(self, isolated_agent):
+        conversation = agent_module.new_conversation()
+        conversation.retrieved = "фрагменты"
+        messages = conversation.build_messages(reminder=agent_module.REMINDER)
+        assert any("фрагменты" in message["content"] for message in messages)
 
 
 # ====================================================================

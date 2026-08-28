@@ -285,16 +285,29 @@ class ProjectMap:
     def files_matching(self, path: str) -> list[str]:
         """Файлы проекта, подходящие под то, что назвал человек.
 
-        Совпадение по полному пути или по имени файла, а если ни то ни
-        другое не сошлось — по похожести (опечатки в путях неизбежны).
+        Совпадение по полному пути, по имени файла или по имени без
+        расширения, а если ничего не сошлось — по похожести: опечатки
+        в путях неизбежны, и «gitignore» вместо «.gitignore» человек
+        пишет чаще, чем правильный вариант.
         """
         wanted = path.strip().replace("\\", "/").lstrip("./").lower()
-        if not wanted or "." not in wanted:
+        # Два символа — это не имя файла, а предлог; такое сравнивать
+        # по похожести бессмысленно.
+        if len(wanted) < 3:
             return []
 
         matches = [
             source for source in self.files
             if source.lower() == wanted or source.lower().endswith("/" + wanted)
+        ]
+        if matches:
+            return matches
+
+        # Имя без пути и без расширения: «cards», «LICENSE», «gitignore».
+        matches = [
+            source for source in self.files
+            if source.split("/")[-1].lower() in (wanted, f".{wanted}")
+            or source.split("/")[-1].rsplit(".", 1)[0].lower() == wanted
         ]
         if matches:
             return matches
