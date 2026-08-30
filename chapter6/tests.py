@@ -1561,3 +1561,27 @@ class TestLiteralOccurrences:
         name = "zz" + "Nowhere" + "InThisRepo"
         answer = agent_module.literal_occurrences(f"где встречается {name}")
         assert "не встречается ни разу" in answer
+
+
+class TestEmbeddingModelSwitch:
+    """Глава 6 поднимает модель эмбеддингов, Главы 4 и 5 её не трогают.
+
+    Так же, как Глава 5 переопределяет размер окна Главы 1: числа каждой
+    главы воспроизводятся ровно на той модели, на которой сняты.
+    """
+
+    def test_chapter6_raises_the_model(self):
+        assert embeddings_module.EMBED_MODEL == "bge-m3"
+
+    def test_chapter4_keeps_its_own_default(self):
+        """В самом модуле Главы 4 по умолчанию по-прежнему nomic."""
+        source = (Path(__file__).parent.parent / "chapter4/src/embeddings.py").read_text(
+            encoding="utf-8"
+        )
+        assert 'os.environ.get("AGENT_EMBED_MODEL", "nomic-embed-text")' in source
+
+    def test_collection_carries_the_model(self):
+        """Индекс принадлежит модели: 768 чисел против 1024 в одной не уживутся."""
+        from chapter5.src.codebase import code_collection
+
+        assert code_collection() == "chapter5_code_bge_m3"
