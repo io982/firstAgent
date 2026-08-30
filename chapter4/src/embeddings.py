@@ -33,7 +33,39 @@ from chapter1.agent import OLLAMA_BASE
 # Отдельная модель под эмбеддинги. Менять через переменную окружения:
 #   PowerShell:   $env:AGENT_EMBED_MODEL = "bge-m3"
 #   Linux/macOS:  export AGENT_EMBED_MODEL=bge-m3
-EMBED_MODEL = os.environ.get("AGENT_EMBED_MODEL", "nomic-embed-text")
+# ПО УМОЛЧАНИЮ bge-m3 — и это результат замера Главы 6, а не вкус.
+#
+# Двенадцать русских вопросов о коде, попадание нужного определения
+# в первую пятёрку, векторный поиск без всякой обработки запроса:
+#
+#     nomic-embed-text    1 из 12
+#     bge-m3             10 из 12
+#
+# Разница не в поиске, а в модели: nomic обучен в основном на английском
+# и на русском вопросе меряет «это вообще русская проза?», а не тему.
+# Глава 5 из-за этого пришла к выводу, что векторы на коде бесполезны,
+# и построила вокруг этого две главы. Вывод был про модель.
+#
+# Платим за это видеопамятью: 274 МБ против 1.2 ГБ. Вместе с qwen2.5:3b
+# всё ещё влезает в 6 ГБ, но если памяти меньше — возвращайте nomic:
+#   PowerShell:   $env:AGENT_EMBED_MODEL = "nomic-embed-text"
+#   Linux/macOS:  export AGENT_EMBED_MODEL=nomic-embed-text
+EMBED_MODEL = os.environ.get("AGENT_EMBED_MODEL", "bge-m3")
+
+
+def model_slug(model: str = "") -> str:
+    """Имя модели, годное как часть имени коллекции: bge-m3 → bge_m3.
+
+    Нужно потому, что ВЕКТОРНЫЙ ИНДЕКС ПРИНАДЛЕЖИТ МОДЕЛИ, а не проекту.
+    У nomic-embed-text вектор из 768 чисел, у bge-m3 из 1024 — сложить их
+    в одну коллекцию нельзя, а если попытаться, база ответит ошибкой
+    про размерность, из которой не видно, что делать.
+
+    Имя модели в имени коллекции решает это молча: сменили модель — рядом
+    появился новый индекс, старый остался лежать. Переключились обратно —
+    старый снова в работе, пересобирать ничего не надо.
+    """
+    return (model or EMBED_MODEL).split(":")[0].replace("-", "_").replace(".", "_")
 
 # Эмбеддинг считается быстрее генерации, но первый запрос ещё и грузит
 # модель в память — отсюда запас по таймауту.
@@ -62,6 +94,19 @@ BATCH_SIZE = 32
 # Разбор — в разделе «Почему вопрос и документ кодируются по-разному».
 DOCUMENT_PREFIX = "search_document"
 QUERY_PREFIX = "search_query"
+
+# Префиксы — свойство КОНКРЕТНОЙ модели, а не эмбеддингов вообще.
+# Так устроен nomic-embed-text; bge-m3 и multilingual-e5 симметричны
+# и приписку впереди текста считают частью текста. Приписывая её всем
+# подряд, мы вносим в симметричную модель искусственную асимметрию:
+# один и тот же текст как документ и как запрос получал бы разные векторы
+# из-за служебного слова, а не из-за содержания.
+PREFIXED_MODELS = ("nomic-embed-text",)
+
+
+def uses_prefixes(model: str = "") -> bool:
+    """Понимает ли модель `search_document:` и `search_query:`."""
+    return (model or EMBED_MODEL).split(":")[0] in PREFIXED_MODELS
 
 
 class EmbeddingError(RuntimeError):
@@ -231,7 +276,10 @@ def _embed_many(texts: list[str], prefix: str) -> list[list[float]]:
 
     for start in range(0, len(missing), BATCH_SIZE):
         batch = missing[start:start + BATCH_SIZE]
-        prompts = [f"{prefix}: {text}" for _, text in batch]
+        prompts = [
+            f"{prefix}: {text}" if uses_prefixes() else text
+            for _, text in batch
+        ]
         vectors = _request_embeddings(prompts)
         for (i, text), vector in zip(batch, vectors):
             unit = normalize(vector)

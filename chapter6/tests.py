@@ -475,11 +475,21 @@ class TestHybridSearch:
             hybrid.search("estimate_tokens", mode="magic")
 
     def test_search_survives_an_empty_vector_store(self, repo, fake_embeddings):
-        """Векторный индекс не собран — лексическая половина работает одна."""
+        """Векторный индекс не собран — поиск не падает, а возвращает пусто.
+
+        По умолчанию агент ищет векторами, и без собранного индекса кода
+        отвечать ему нечем. Падать при этом нельзя: несобранный индекс —
+        обычное состояние при первом запуске.
+        """
         code = CodeIndex(store=MemoryVectorStore(None), root=repo, index_docs=False)
         index = HybridIndex(code_index=code, bm25=BM25Index())
         index.sync_lexical()
-        assert index.search("is_safe_query")
+
+        assert index.search("is_safe_query") == []
+        # А лексическая половина при этом работает — на ней стоят ворота
+        # отказа, и они обязаны работать без единого вектора.
+        assert index.search("is_safe_query", mode="bm25")
+        assert not index.looks_absent("is_safe_query")
 
 
 class TestHybridRetrieve:
@@ -1077,7 +1087,8 @@ class TestRealReranker:
 # из которых текст главы делает вывод.
 
 def measure(index: HybridIndex, mode: str = "hybrid", rewrite: bool = False,
-            reranker: bool = False, top_k: int = 5) -> tuple[int, float, list[str]]:
+            reranker: bool = False, top_k: int = 5,
+            by_name: bool = False) -> tuple[int, float, list[str]]:
     """Сколько вопросов достали своё определение и как высоко оно стояло.
 
     Возвращает (попаданий, MRR, строки отчёта). MRR — средний обратный ранг:
@@ -1089,6 +1100,11 @@ def measure(index: HybridIndex, mode: str = "hybrid", rewrite: bool = False,
     lines: list[str] = []
 
     for question, name in TARGETS:
+        # by_name — вопрос задан ТОЧНЫМ ИМЕНЕМ, а не описанием. Это второй
+        # худший случай, зеркальный основному: тут у лексического поиска
+        # есть ровно то слово, которое надо, а у векторного — одно
+        # незнакомое слово вместо фразы.
+        question = name if by_name else question
         query = rewrite_module.expand_query(question, enabled=True) if rewrite else question
         # Реранкеру дают БОЛЬШЕ кандидатов, чем уедет в контекст, — так же,
         # как это делает агент (см. augment_with_code). Мерить по восьми
@@ -1309,3 +1325,239 @@ class TestQuestionFrame:
 
     def test_a_real_code_question_still_passes(self, hybrid):
         assert not hybrid.lexical_signal("где реализовано арифметическое выражение").absent
+
+
+@pytest.mark.slow
+class TestExactNameQuestions:
+    """Замер: вопрос задан точным именем, а не описанием.
+
+    Двенадцать вопросов основного замера намеренно не содержат ни одного
+    слова из кода — это худший случай для поиска по словам и лучший для
+    эмбеддера. Зеркальный случай не мерился ни разу, хотя именно им
+    Глава 5 обосновывала лексический поиск: `is_safe_query` не находится
+    вопросом, в котором нет слова `is_safe_query`.
+
+    Здесь вопрос — само имя. Прогонять на обоих эмбеддерах:
+        AGENT_EMBED_MODEL=bge-m3 python -m pytest chapter6/tests.py -m slow -k ExactName -s
+    """
+
+    def test_name_as_the_question(self):
+        index = real_hybrid(PYTHON_CORPUS)
+        print(f"\nЭмбеддер: {embeddings_module.EMBED_MODEL}, "
+              f"корпус {index.lexical.count()} фрагментов")
+
+        for mode in ("vector", "bm25", "hybrid"):
+            found, mrr, lines = measure(index, mode=mode, by_name=True)
+            print(f"\n{mode}: {found}/{len(TARGETS)}, MRR {mrr:.2f}")
+            print("\n".join(lines))
+
+        assert True  # числа печатаются, вывод делает текст главы
+
+
+# ====================================================================
+# ЗАМЕР: КАКОЙ ПОИСК ЛУЧШЕ НА КАКОМ ТИПЕ ВОПРОСА
+# ====================================================================
+# Первые замеры главы брали ОДИН тип вопроса — русское описание без слов
+# из кода — и на нём строили все выводы. Тип оказался крайним случаем:
+# худшим для поиска по словам и лучшим для эмбеддера. Здесь тот же набор
+# из двенадцати определений спрашивается шестью разными способами.
+
+# Те же двенадцать вопросов по-английски. Докстроки в проекте русские,
+# код английский — этот столбец показывает, по чему на самом деле
+# находится фрагмент.
+ENGLISH = {
+    "calculator": "where is the arithmetic expression evaluated",
+    "estimate_tokens": "how is the number of tokens in a text estimated",
+    "trim_by_tokens": "how is the conversation history trimmed to a budget",
+    "chunk_text": "where is a document split into overlapping chunks",
+    "cosine_similarity": "how is the similarity between two vectors computed",
+    "embed_document": "where is text turned into a vector",
+    "extract_json_from_text": "how is JSON extracted from the model reply",
+    "is_safe_query": "where is the request checked for prompt injection",
+    "LongTermMemory": "where are facts about the user stored between runs",
+    "summarize_history": "how is old conversation compressed into a summary",
+    "select_history": "where is it decided which messages stay in context",
+    "build_context": "how does the output fit into the context limit",
+}
+
+
+def with_typo(question: str) -> str:
+    """Выбрасывает одну букву из самого длинного слова.
+
+    Детерминированно и похоже на настоящую опечатку. Живой прогон показал,
+    что опечатка ломает не поиск, а маршрутизацию: «реализоано» не подошло
+    под маркер `реализов`, и вопрос уехал в другой корпус.
+    """
+    words = question.split()
+    longest = max(range(len(words)), key=lambda i: len(words[i]))
+    word = words[longest]
+    words[longest] = word[: len(word) // 2] + word[len(word) // 2 + 1:]
+    return " ".join(words)
+
+
+def variants(question: str, name: str) -> dict[str, str]:
+    """Шесть способов спросить об одном и том же определении."""
+    from chapter5.src.cards import split_identifier
+
+    return {
+        "описание по-русски": question,
+        "описание с опечаткой": with_typo(question),
+        "описание по-английски": ENGLISH[name],
+        "точное имя": name,
+        "имя словами": " ".join(split_identifier(name)) or name,
+        "описание и имя": f"{question} {name}",
+    }
+
+
+@pytest.mark.slow
+class TestQuestionTypes:
+    """Какой поиск выигрывает на каком типе вопроса.
+
+    Прогонять на обоих эмбеддерах:
+        AGENT_EMBED_MODEL=bge-m3 python -m pytest chapter6/tests.py -m slow -k QuestionTypes -s
+    """
+
+    def test_search_by_question_type(self):
+        index = real_hybrid(PYTHON_CORPUS)
+        kinds = list(variants(*TARGETS[0]))
+        table: dict[str, dict[str, tuple[int, float]]] = {}
+
+        for kind in kinds:
+            table[kind] = {}
+            for mode in ("vector", "bm25", "hybrid"):
+                found = 0
+                reciprocal = 0.0
+                for question, name in TARGETS:
+                    hits = index.search(variants(question, name)[kind], top_k=TOP_K, mode=mode)
+                    rank = next(
+                        (n for n, hit in enumerate(hits, 1)
+                         if contains_definition(hit.text, name)),
+                        0,
+                    )
+                    found += bool(rank)
+                    reciprocal += 1 / rank if rank else 0.0
+                table[kind][mode] = (found, reciprocal / len(TARGETS))
+
+        print(f"\nЭмбеддер: {embeddings_module.EMBED_MODEL}, "
+              f"корпус {index.lexical.count()} фрагментов, {len(TARGETS)} определений")
+        print(f"\n{'тип вопроса':24} {'векторы':>14} {'BM25':>14} {'гибрид':>14}   лучший")
+        for kind, row in table.items():
+            cells = "".join(f"{f'{v[0]}/12 · {v[1]:.2f}':>15}" for v in row.values())
+            best = max(row, key=lambda m: (row[m][1], row[m][0]))
+            print(f"{kind:24}{cells}   {best}")
+
+        assert table  # числа печатаются, вывод делает текст главы
+
+
+@pytest.mark.slow
+class TestQueryPreparation:
+    """Что делать с вопросом перед поиском: один вызов модели, четыре варианта.
+
+    Переписывание Главы 5 и перевод на английский стоят одинаково — по одному
+    обращению к модели — и вставляются в одно и то же место конвейера.
+    Значит выбрать надо один.
+
+        AGENT_EMBED_MODEL=bge-m3 python -m pytest chapter6/tests.py -m slow -k Preparation -s
+    """
+
+    def test_query_preparation(self):
+        from chapter6.src.translate import (
+            clear_translate_cache,
+            translate_query,
+            translate_stats,
+        )
+
+        rewrite_module.clear_rewrite_cache()
+        clear_translate_cache()
+        index = real_hybrid(PYTHON_CORPUS)
+
+        def as_is(question: str) -> str:
+            return question
+
+        def rewritten(question: str) -> str:
+            return rewrite_module.expand_query(question, enabled=True)
+
+        def english(question: str) -> str:
+            return translate_query(question) or question
+
+        def english_and_names(question: str) -> str:
+            return f"{english(question)} {rewritten(question)}".strip()
+
+        prepare = {
+            "как есть": as_is,
+            "переписывание (Глава 5)": rewritten,
+            "перевод на английский": english,
+            "перевод и имена": english_and_names,
+        }
+
+        print(f"\nЭмбеддер: {embeddings_module.EMBED_MODEL}, "
+              f"корпус {index.lexical.count()} фрагментов")
+
+        for label, make in prepare.items():
+            found = 0
+            reciprocal = 0.0
+            lines = []
+            for question, name in TARGETS:
+                query = make(question)
+                hits = index.search(query, top_k=TOP_K, mode="vector")
+                rank = next(
+                    (n for n, hit in enumerate(hits, 1)
+                     if contains_definition(hit.text, name)),
+                    0,
+                )
+                found += bool(rank)
+                reciprocal += 1 / rank if rank else 0.0
+                lines.append(f"  {'✓' if rank else '✗'} {query[:70]}")
+            print(f"\n{label}: {found}/{len(TARGETS)}, MRR {reciprocal / len(TARGETS):.2f}")
+            print("\n".join(lines))
+
+        print(f"\nпереписывание: {rewrite_module.rewrite_stats()}")
+        print(f"перевод:       {translate_stats()}")
+
+        assert True  # числа печатаются, вывод делает текст главы
+
+
+class TestLiteralOccurrences:
+    """«Где встречается X» — вопрос про буквы, а не про смысл.
+
+    Появилось из живого прогона: после перехода на векторное ранжирование
+    вопрос «где встречается HISTORY_BUDGET» получил два фрагмента ПРО
+    бюджет истории, в которых самого имени нет ни разу, — и модель назвала
+    их местами, где константа встречается.
+    """
+
+    def test_occurrence_question_is_answered_by_grep(self):
+        answer = agent_module.literal_occurrences("где встречается HISTORY_BUDGET?")
+        assert "HISTORY_BUDGET" in answer
+        assert "перебор файлов" in answer
+
+    def test_every_named_address_really_contains_the_name(self):
+        """Главное свойство: адреса не выдуманы, они проверены перебором."""
+        answer = agent_module.literal_occurrences("где встречается HISTORY_BUDGET?")
+        addresses = re.findall(r"^(\S+?):(\d+):", answer, re.MULTILINE)
+        assert addresses
+        for path, number in addresses:
+            line = Path(path).read_text(encoding="utf-8").splitlines()[int(number) - 1]
+            assert "HISTORY_BUDGET" in line
+
+    def test_code_comes_before_documentation(self):
+        """README — это упоминание, а не место в коде."""
+        answer = agent_module.literal_occurrences("где встречается HISTORY_BUDGET?")
+        first = re.search(r"^(\S+?):\d+:", answer, re.MULTILINE).group(1)
+        assert not first.endswith(".md")
+
+    def test_a_meaning_question_is_left_to_search(self):
+        assert agent_module.literal_occurrences("где реализован калькулятор") == ""
+
+    def test_question_without_a_name_is_left_to_search(self):
+        """По русскому слову grep вернул бы полпроекта."""
+        assert agent_module.literal_occurrences("где встречается бюджет") == ""
+
+    def test_missing_name_gets_a_plain_answer(self):
+        # Имя собирается из кусков: написанное целиком, оно оказалось бы
+        # в этом файле, а grep обходит и его тоже. Правило, выученное
+        # в этой главе четырежды: имя, которого «в проекте нет», нельзя
+        # писать НИ В ОДИН индексируемый файл — включая комментарии.
+        name = "zz" + "Nowhere" + "InThisRepo"
+        answer = agent_module.literal_occurrences(f"где встречается {name}")
+        assert "не встречается ни разу" in answer

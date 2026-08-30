@@ -28,7 +28,7 @@ from typing import Any
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-from .embeddings import dot
+from .embeddings import dot, model_slug
 
 # Куда ChromaDB кладёт свою базу. Папка уже в .gitignore: индекс —
 # производная от документов, его не жалко удалить и пересобрать.
@@ -40,6 +40,15 @@ INDEX_DIR = Path(__file__).parent.parent / "index"
 # Префикс коллекций Главы 4 в общей базе Chroma. Он нужен: в chroma_db
 # может лежать что угодно ещё, а имена коллекций там плоские.
 COLLECTION_PREFIX = "chapter4_"
+
+
+def collection_name(name: str) -> str:
+    """Имя коллекции с моделью эмбеддингов внутри: chapter4_docs_bge_m3.
+
+    Модель в имени — не украшение: у разных моделей разная размерность
+    вектора, и одна коллекция их не выдержит (см. model_slug).
+    """
+    return f"{COLLECTION_PREFIX}{name}_{model_slug()}"
 
 # Какое хранилище используется по умолчанию. Chroma — настоящая база:
 # бинарные векторы, инкрементальная запись, HNSW-индекс при росте корпуса.
@@ -238,7 +247,7 @@ class ChromaVectorStore(VectorStore):
 
     def __init__(
         self,
-        collection: str = f"{COLLECTION_PREFIX}docs",
+        collection: str = "",
         persist_dir: Path | str = CHROMA_PERSIST_DIR,
     ):
         try:
@@ -251,7 +260,7 @@ class ChromaVectorStore(VectorStore):
 
         self._client = chromadb.PersistentClient(path=str(persist_dir))
         self._collection = self._client.get_or_create_collection(
-            name=collection,
+            name=collection or collection_name("docs"),
             # Косинус, а не евклидово расстояние по умолчанию: см. оговорку
             # про длину вектора в cosine_similarity.
             metadata={"hnsw:space": "cosine"},
@@ -349,6 +358,6 @@ def get_store(backend: str | None = None, name: str = "docs", **kwargs: Any) -> 
         kwargs.setdefault("persist_path", INDEX_DIR / f"{name}.json")
         return MemoryVectorStore(**kwargs)
     if backend == "chroma":
-        kwargs.setdefault("collection", f"{COLLECTION_PREFIX}{name}")
+        kwargs.setdefault("collection", collection_name(name))
         return ChromaVectorStore(**kwargs)
     raise ValueError(f"Неизвестное хранилище: {backend}. Доступны: memory, chroma")

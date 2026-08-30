@@ -19,6 +19,7 @@
 """
 import json
 import os
+import re
 import sys
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -73,9 +74,12 @@ from chapter5.agent import (
 )
 from chapter5.src import expand_query, get_project_map, set_code_budget
 from chapter6.src import (
+    DEFAULT_MODE,
     RERANK_CANDIDATES,
+    RERANK_ENABLED,
     TOP_K,
     get_hybrid_index,
+    grep,
     rerank,
     rerank_stats,
 )
@@ -177,6 +181,62 @@ def budget_report() -> str:
 # АВТОПОИСК ПО КОДУ
 # ====================================================================
 
+# Слова, по которым видно, что спрашивают про ВХОЖДЕНИЯ, а не про смысл:
+# «где встречается X», «кто использует X», «где упоминается X». Ответ на них
+# даёт не поиск, а перебор файлов — точно и без модели.
+OCCURRENCE_MARKERS = (
+    "встречается", "встречаются", "упоминается", "упоминаются",
+    "где ещё", "где еще", "в каких файлах", "во всех файлах",
+)
+
+# Сколько вхождений кладём в контекст. Частое имя встречается сотни раз,
+# и списком на сотню строк бюджет выдачи не переживёт.
+MAX_OCCURRENCES = 12
+
+
+def literal_occurrences(user_input: str) -> str:
+    """Точные вхождения имени из вопроса — если спрашивают именно про них.
+
+    Пустая строка, если вопрос не про вхождения или имени в нём нет.
+    """
+    lowered = user_input.lower()
+    if not any(marker in lowered for marker in OCCURRENCE_MARKERS):
+        return ""
+
+    # Ищем то, что похоже на имя из кода: латиница, длиной от трёх букв.
+    # Русские слова сюда не годятся — по ним grep вернёт полпроекта.
+    names = [word for word in re.findall(r"[A-Za-z_][A-Za-z0-9_]{2,}", user_input)]
+    if not names:
+        return ""
+
+    name = max(names, key=len)
+    found = grep(name)
+    if not found:
+        return (
+            f"Точный поиск по файлам проекта: строка «{name}» не встречается ни разу."
+        )
+
+    # Документация уезжает в хвост по той же причине, по которой Глава 5
+    # опускает тесты: на вопрос «где встречается имя из кода» README —
+    # это упоминание, а не место в коде.
+    found.sort(key=lambda pair: pair[0].rsplit(".", 1)[-1].startswith(("md", "rst", "txt")))
+
+    shown = found[:MAX_OCCURRENCES]
+    lines = [f"{where}: {line}" for where, line in shown]
+    tail = (
+        f"\n…и ещё {len(found) - len(shown)} вхождений в {len(found)} местах всего."
+        if len(found) > len(shown)
+        else ""
+    )
+    print(f"📎 Точные вхождения «{name}»: {len(found)}")
+    return (
+        f"Точные вхождения «{name}» в файлах проекта ({len(found)} всего). "
+        f"Это перебор файлов, а не поиск по смыслу: адреса верные.\n\n"
+        + "\n".join(lines)
+        + tail
+    )
+
+
 def augment_with_code(conversation: SelectiveConversation, user_input: str) -> bool:
     """Кладёт найденный код в контекст ДО первого вызова модели.
 
@@ -201,6 +261,22 @@ def augment_with_code(conversation: SelectiveConversation, user_input: str) -> b
         return False
 
     index = get_hybrid_index()
+
+    # Вопрос «где ВСТРЕЧАЕТСЯ X» — не вопрос про смысл, и векторному поиску
+    # его отдавать нельзя. Живой прогон, из-за которого это появилось:
+    # на «где встречается HISTORY_BUDGET» векторы вернули два фрагмента
+    # ПРО бюджет истории, в которых самого имени нет ни разу, — и модель
+    # уверенно назвала их местами, где константа встречается.
+    #
+    # Это регрессия от перехода на векторное ранжирование: у BM25 такой
+    # ошибки не было, он ищет буквы. Инструмент для буквального поиска
+    # у агента есть (grep_code), но 3B его не зовёт, получив фрагменты
+    # в контексте, — та же беда, что измерена в Главе 5. Поэтому здесь
+    # мы не просим модель, а кладём точные вхождения сами.
+    occurrences = literal_occurrences(user_input)
+    if occurrences:
+        conversation.retrieved = occurrences
+        return True
 
     # Точные определения по таблице символов — как в Главе 5, первыми
     # и до всякого поиска.
@@ -410,7 +486,8 @@ if __name__ == "__main__":
         print("   ollama pull nomic-embed-text")
         sys.exit(1)
 
-    print("🤖 Агент Главы 6 готов (гибридный поиск: векторы + слова + реранкер).")
+    print(f"🤖 Агент Главы 6 готов (поиск «{DEFAULT_MODE}» + реранкер"
+          f"{'' if RERANK_ENABLED else ' — выключен'}).")
     print(budget_report())
     print(index_status())
     print(lexical_status())
@@ -422,9 +499,12 @@ if __name__ == "__main__":
     )
 
     print("Примеры запросов:")
-    print("  - 'Где реализован калькулятор?' (гибридный поиск по коду)")
+    print("  - 'Где реализован калькулятор?' (поиск по словам)")
     print("  - 'Где встречается HISTORY_BUDGET?' (точные вхождения, grep_code)")
-    print("  - 'Как настроить кубернетес кластер?' (ответ «в проекте этого нет»)")
+    # Конкретного имени в примере НЕТ намеренно: любое имя, написанное
+    # в этом файле, попадёт в индекс кода и перестанет быть отсутствующим.
+    print("  - 'Где реализован метод <любое выдуманное имя>?'")
+    print("    (ответ «в проекте этого нет» — имя подставьте своё)")
     print("  - 'Где определён estimate_tokens?' (таблица символов, без поиска)")
     print("Команды: 'индекс кода' — сверить оба индекса кода, 'код' — что в них лежит,")
     print("'реранкер' — сколько раз его звали, 'карта' — пересобрать карту проекта,")

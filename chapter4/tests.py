@@ -74,7 +74,12 @@ from chapter4.src.knowledge import (
 )
 from chapter4.src.selective import SelectiveConversation
 from chapter4.src.semantic_memory import SemanticMemory, fact_id, set_semantic_memory
-from chapter4.src.vectorstore import Hit, MemoryVectorStore, get_store
+from chapter4.src.vectorstore import (
+    Hit,
+    MemoryVectorStore,
+    collection_name,
+    get_store,
+)
 
 # ====================================================================
 # ПОДДЕЛКА МОДЕЛИ ЭМБЕДДИНГОВ
@@ -249,12 +254,33 @@ class TestVectorMath:
 # ====================================================================
 
 class TestEmbeddingPipeline:
-    def test_document_and_query_use_different_prefixes(self, fake_embeddings):
+    def test_document_and_query_use_different_prefixes(self, fake_embeddings, monkeypatch):
+        """У nomic-embed-text роль текста сообщается префиксом."""
+        monkeypatch.setattr(embeddings_module, "EMBED_MODEL", "nomic-embed-text")
         embed_document("текст")
         embed_query("текст")
         prompts = fake_embeddings["prompts"]
         assert prompts[0].startswith(f"{DOCUMENT_PREFIX}: ")
         assert prompts[1].startswith(f"{QUERY_PREFIX}: ")
+
+    def test_symmetric_model_gets_no_prefixes(self, fake_embeddings, monkeypatch):
+        """А bge-m3 симметрична, и приписку впереди она считает частью текста.
+
+        Приписывая её всем моделям подряд, мы вносили бы в симметричную
+        модель искусственную асимметрию: один и тот же текст как документ
+        и как запрос получал бы разные векторы из-за служебного слова.
+        """
+        monkeypatch.setattr(embeddings_module, "EMBED_MODEL", "bge-m3")
+        embed_document("текст")
+        embed_query("текст")
+        assert fake_embeddings["prompts"] == ["текст", "текст"]
+
+    def test_collection_name_carries_the_model(self, monkeypatch):
+        """Индекс принадлежит модели: у неё своя размерность вектора."""
+        monkeypatch.setattr(embeddings_module, "EMBED_MODEL", "bge-m3")
+        assert collection_name("docs") == "chapter4_docs_bge_m3"
+        monkeypatch.setattr(embeddings_module, "EMBED_MODEL", "nomic-embed-text")
+        assert collection_name("docs") == "chapter4_docs_nomic_embed_text"
 
     def test_same_text_with_different_prefix_is_not_a_cache_hit(self, fake_embeddings):
         """Иначе документ и запрос получили бы один вектор — а они разные."""

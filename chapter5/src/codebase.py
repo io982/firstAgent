@@ -25,7 +25,7 @@ import time
 from pathlib import Path
 
 from chapter3.src.context import estimate_tokens
-from chapter4.src.embeddings import embed_documents, embed_query
+from chapter4.src.embeddings import embed_documents, embed_query, model_slug
 from chapter4.src.knowledge import IndexReport
 from chapter4.src.vectorstore import (
     CHROMA_PERSIST_DIR,
@@ -97,6 +97,16 @@ CUT_MARK = "# […фрагмент обрезан по бюджету конте
 MIN_USEFUL_LINES = 3
 
 
+def code_collection() -> str:
+    """Имя коллекции с моделью эмбеддингов внутри: chapter5_code_bge_m3.
+
+    Индекс принадлежит модели: у nomic-embed-text вектор из 768 чисел,
+    у bge-m3 из 1024, и в одной коллекции они не уживутся. Имя с моделью
+    внутри позволяет держать оба и переключаться, ничего не пересобирая.
+    """
+    return f"{CODE_COLLECTION}_{model_slug()}"
+
+
 def get_code_store(backend: str | None = None) -> VectorStore:
     """Хранилище под код: та же пара классов Главы 4, свой корпус.
 
@@ -109,7 +119,9 @@ def get_code_store(backend: str | None = None) -> VectorStore:
     if backend == "memory":
         return MemoryVectorStore(persist_path=INDEX_DIR / "code.json")
     if backend == "chroma":
-        return ChromaVectorStore(collection=CODE_COLLECTION, persist_dir=CHROMA_PERSIST_DIR)
+        return ChromaVectorStore(
+            collection=code_collection(), persist_dir=CHROMA_PERSIST_DIR
+        )
     raise ValueError(f"Неизвестное хранилище: {backend}. Доступны: memory, chroma")
 
 
