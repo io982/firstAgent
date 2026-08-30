@@ -79,6 +79,9 @@ SKIP_DIRS: frozenset[str] = frozenset({
     "dist", "build", "out", "target", "htmlcov", ".next", ".nuxt",
     ".idea", ".vscode",
     "chroma_db",
+    # Настройки самого агента-помощника: скиллы, хуки, права. Это про то,
+    # чем проект разрабатывают, а не про то, из чего он состоит.
+    ".claude",
 })
 
 # Файлы, которые формально исходники, а по сути данные: собранные бандлы,
@@ -116,8 +119,29 @@ MAX_FILE_BYTES = 200_000
 # .gitignore
 # ====================================================================
 
+def gitignore_entries(root: Path) -> tuple[set[str], set[str]]:
+    """Что из .gitignore мы умеем понять: имена папок и пути к файлам.
+
+    Возвращает пару (папки, файлы). Разбирается НЕ весь формат .gitignore,
+    и это осознанно: полная его поддержка — отдельная библиотека
+    с приоритетами, отрицаниями и вложенными файлами правил.
+
+    Две разные вещи, которые раньше были одной. Строка `drafts/` — это папка,
+    в неё не заходим. Строка `chapter3/memory.json` — это ФАЙЛ внутри папки,
+    и пропустить надо именно его, а не всю Главу 3.
+
+    Второй случай сначала просто выбрасывался, и это была не мелочь: файл
+    `chapter3/memory.json` с фактами о пользователе и `previous_session.json`
+    с хвостом прошлого разговора попадали в индекс кода наравне с исходниками
+    — уезжали в модель эмбеддингов и ложились на диск в chroma_db. Ровно то,
+    что тексты глав 5 и 6 обещали не делать.
+    """
+    directories, files = _parse_gitignore(root)
+    return directories, files
+
+
 def gitignore_dirs(root: Path) -> set[str]:
-    """Имена папок из .gitignore — те, которые можно понять без glob'а.
+    """Только имена папок. Оставлено ради совместимости с Главой 5.
 
     Разбирается НЕ весь формат .gitignore, и это осознанно: полная его
     поддержка — это отдельная библиотека с приоритетами, отрицаниями и
@@ -129,15 +153,21 @@ def gitignore_dirs(root: Path) -> set[str]:
     черновики глав из `drafts/` наравне с живым кодом — и агент отвечал бы
     по коду, которого в проекте нет.
     """
+    return _parse_gitignore(root)[0]
+
+
+def _parse_gitignore(root: Path) -> tuple[set[str], set[str]]:
+    """Разбор .gitignore на имена папок и относительные пути к файлам."""
     ignore_file = Path(root) / ".gitignore"
     if not ignore_file.exists():
-        return set()
+        return set(), set()
 
-    names: set[str] = set()
+    directories: set[str] = set()
+    files: set[str] = set()
     try:
         lines = ignore_file.read_text(encoding="utf-8").splitlines()
     except (OSError, UnicodeDecodeError):
-        return names
+        return directories, files
 
     for line in lines:
         line = line.strip()
@@ -146,12 +176,20 @@ def gitignore_dirs(root: Path) -> set[str]:
         if any(char in line for char in "*?[]"):
             continue  # шаблон, а не имя — не наш случай
         name = line.rstrip("/").lstrip("/")
-        # Правило вида `chapter3/memory.json` — это файл внутри папки,
-        # а не сама папка: пропустив `chapter3`, мы потеряли бы Главу 3.
-        if name and "/" not in name:
-            names.add(name)
+        if not name:
+            continue
+        if "/" in name:
+            # Путь: `chapter3/memory.json`, `chapter4/index`. Папка это или
+            # файл — решаем по диску, а не по написанию: строка `chapter4/index`
+            # без слэша на конце всё равно папка.
+            if (Path(root) / name).is_dir():
+                directories.add(name)
+            else:
+                files.add(name)
+        else:
+            directories.add(name)
 
-    return names
+    return directories, files
 
 
 # ====================================================================
@@ -189,8 +227,14 @@ def iter_sources(
         return [root] if language_of(root) else []
 
     skip = set(SKIP_DIRS)
+    skip_files: set[str] = set()
     if respect_gitignore:
-        skip |= gitignore_dirs(root)
+        ignored_dirs, skip_files = gitignore_entries(root)
+        # Имена папок отсекаются на любом уровне вложенности, пути — целиком.
+        skip |= {name for name in ignored_dirs if "/" not in name}
+        nested = {name for name in ignored_dirs if "/" in name}
+    else:
+        nested = set()
 
     found: list[Path] = []
     for dirpath, dirnames, filenames in os.walk(root):
@@ -202,9 +246,21 @@ def iter_sources(
         # (сборка, тесты, релиз), и вопрос «где настроен CI» законный.
         dirnames[:] = sorted(d for d in dirnames if d not in skip)
 
+        relative_dir = Path(dirpath).relative_to(root).as_posix()
+        if relative_dir != "." and any(
+            relative_dir == name or relative_dir.startswith(name + "/") for name in nested
+        ):
+            dirnames[:] = []
+            continue
+
         for filename in sorted(filenames):
             path = Path(dirpath) / filename
             if not language_of(path):
+                continue
+            # Файл, названный в .gitignore поимённо: `chapter3/memory.json`.
+            # Проверяется до размера и языка — там лежат личные данные,
+            # и в индексе им не место ни при каких условиях.
+            if path.relative_to(root).as_posix() in skip_files:
                 continue
             try:
                 if path.stat().st_size > max_bytes:

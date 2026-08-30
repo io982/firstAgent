@@ -53,6 +53,7 @@ from chapter5.src.codechunks import (
 from chapter5.src.languages import (
     MAX_FILE_BYTES,
     gitignore_dirs,
+    gitignore_entries,
     iter_sources,
     language_of,
     read_source,
@@ -267,7 +268,15 @@ def repo(tmp_path) -> Path:
     (root / "web" / "store.ts").write_text(SAMPLE_TS, encoding="utf-8")
     (root / "README.md").write_text(README_MD, encoding="utf-8")
     (root / "config.toml").write_text(CONFIG_TOML, encoding="utf-8")
-    (root / ".gitignore").write_text("secret/\n*.log\nnode_modules\n", encoding="utf-8")
+    (root / ".gitignore").write_text(
+        "secret/\n*.log\nnode_modules\npkg/memory.json\n", encoding="utf-8"
+    )
+
+    # Личные данные, названные в .gitignore ПОИМЁННО, а не папкой. Раньше
+    # такие правила молча выбрасывались, и файл попадал в индекс.
+    (root / "pkg" / "memory.json").write_text(
+        '{"user_name": "io982", "user_age": "100"}\n', encoding="utf-8"
+    )
 
     # Мусор, которого в индексе быть не должно.
     (root / "node_modules" / "left-pad" / "index.js").write_text("module.exports = 1;\n", encoding="utf-8")
@@ -322,6 +331,34 @@ class TestSourceDiscovery:
         """Индекс не должен знать больше, чем git."""
         found = {path.name for path in iter_sources(repo)}
         assert "keys.py" not in found
+
+    def test_skips_files_named_in_gitignore(self, repo):
+        """Личные данные в индекс не попадают, даже названные поимённо.
+
+        Живой прогон Главы 6, из-за которого это появилось: `chapter3/memory.json`
+        с именем и возрастом пользователя и `previous_session.json` с хвостом
+        прошлого разговора уезжали в модель эмбеддингов и ложились в chroma_db.
+        Правило `chapter3/memory.json` в .gitignore есть, но разбирались только
+        имена ПАПОК, а правила с косой чертой выбрасывались.
+        """
+        assert "memory.json" not in {path.name for path in iter_sources(repo)}
+
+    def test_agent_settings_are_not_project_source(self, repo):
+        """.claude — про то, чем проект разрабатывают, а не из чего он состоит."""
+        (repo / ".claude" / "skills").mkdir(parents=True)
+        (repo / ".claude" / "skills" / "helper.py").write_text("x = 1\n", encoding="utf-8")
+        assert not any(".claude" in str(path) for path in iter_sources(repo))
+
+    def test_gitignore_separates_directories_from_files(self, tmp_path):
+        (tmp_path / ".gitignore").write_text(
+            "*.log\nbuild/\nchapter3/memory.json\n!keep/\n# комментарий\n", encoding="utf-8"
+        )
+        directories, files = gitignore_entries(tmp_path)
+        assert directories == {"build"}
+        assert files == {"chapter3/memory.json"}
+
+    def test_gitignore_entries_on_empty_repo(self, tmp_path):
+        assert gitignore_entries(tmp_path) == (set(), set())
 
     def test_gitignore_dirs_reads_simple_names_only(self, repo):
         assert gitignore_dirs(repo) == {"secret", "node_modules"}

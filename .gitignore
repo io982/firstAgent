@@ -2,7 +2,6 @@ __pycache__/
 chroma_db/
 chapter4/index/
 chapter5/index/
-
 chapter7/
 chapter8/
 drafts/
@@ -13,3 +12,4 @@ chapter3/previous_session.log
 # Остатки выброшенной core-памяти: файлы могли создаться до переделки
 chapter3/core_memory.json
 chapter3/core_memory.log
+.claude/

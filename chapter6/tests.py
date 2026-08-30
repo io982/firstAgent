@@ -29,6 +29,7 @@ from chapter6.src import tools as tools_module
 from chapter6.src.bm25 import BM25Index
 from chapter6.src.fusion import RRF_K, fuse, rrf, weighted_sum
 from chapter6.src.hybrid import (
+    TOP_K,
     HybridIndex,
     Signal,
     get_hybrid_index,
@@ -40,7 +41,7 @@ from chapter6.src.lexical import (
     tokenize,
     tokenize_query,
 )
-from chapter6.src.reranker import rerank
+from chapter6.src.reranker import RERANK_CANDIDATES, rerank
 from chapter6.src.tools import grep
 
 # ====================================================================
@@ -495,10 +496,16 @@ class TestHybridRetrieve:
         assert estimate_tokens(block) <= 120
 
     def test_retrieve_does_not_apply_the_threshold(self, hybrid):
-        """Порог живёт в инструменте, а не здесь: замерам нужна выдача как есть."""
-        assert hybrid.search("кубернетес кластер", mode="bm25") == []
-        assert hybrid.retrieve("кубернетес кластер", budget_tokens=400) != ""
+        """Отказ живёт в агенте и в инструменте, а не здесь.
+
+        Замерам нужна выдача как есть: чтобы сравнивать способы поиска,
+        поиск не должен по дороге решать, что отвечать не на что.
+        """
         assert hybrid.looks_absent("кубернетес кластер")
+        assert hybrid.search("кубернетес кластер", mode="bm25") == []
+        # Векторная половина ответит на что угодно — в этом вся её беда,
+        # и retrieve её не останавливает.
+        assert hybrid.retrieve("кубернетес кластер", budget_tokens=400, mode="vector") != ""
 
 
 # ====================================================================
@@ -524,12 +531,34 @@ class TestAbsence:
         monkeypatch.setattr(hybrid_module, "NO_ANSWER_BM25", 1.0)
         assert not hybrid.looks_absent("is_safe_query")
 
-    def test_threshold_can_be_switched_off(self, hybrid, monkeypatch):
+    def test_refusal_can_be_switched_off(self, hybrid, monkeypatch):
+        """Обе ручки на нуле — агент снова отвечает на любой вопрос."""
         monkeypatch.setattr(hybrid_module, "NO_ANSWER_BM25", 0.0)
+        monkeypatch.setattr(hybrid_module, "NO_ANSWER_SUPPORT", -1.0)
         assert not hybrid.looks_absent("как настроить кубернетес кластер")
         # Через сам Signal — им пользуется агент, и выключатель обязан
         # действовать и там тоже.
         assert not hybrid.lexical_signal("как настроить кубернетес кластер").absent
+
+    def test_weight_threshold_is_off_by_default(self):
+        """Отказ по весу выключен: на широком наборе вопросов он терял ответы.
+
+        Замер главы: при пороге 8.0 отказ получали 4 настоящих вопроса
+        из 20 — в том числе «где реализовано чтение файлов», где слово
+        «чтение» в коде не встречается, а «читает» встречается.
+        """
+        assert hybrid_module.NO_ANSWER_BM25 == 0.0
+
+    def test_partially_matched_question_is_not_refused(self, hybrid):
+        """Нашлось хоть одно слово — это не «ответа нет»."""
+        signal = hybrid.lexical_signal("где обрезает историю кубернетес")
+        assert signal.missing
+        assert signal.support > 0
+        assert not signal.absent
+
+    def test_empty_question_is_not_a_refusal(self, hybrid):
+        """Пустой вопрос — не то же самое, что «искали и не нашли»."""
+        assert not hybrid.lexical_signal("").absent
 
     def test_signal_on_an_empty_query(self, hybrid):
         signal = hybrid.lexical_signal("")
@@ -770,7 +799,13 @@ class TestAgentRouting:
         try:
             conversation = agent_module.new_conversation()
             assert agent_module.augment_with_code(conversation, "где в коде настройка кубернетес")
-            assert "нет ответа" in conversation.retrieved
+            assert "совпадений нет" in conversation.retrieved
+            assert "кубернетес" in conversation.retrieved
+            # Блок отказа — данные, а не указания модели. Живой прогон
+            # показал, что повелительное наклонение отсюда 3B копирует
+            # в ответ пользователю дословно.
+            for imperative in ("скажи", "НЕ ВЫДУМЫВАЙ", "передай"):
+                assert imperative not in conversation.retrieved
         finally:
             hybrid_module.set_hybrid_index(None)
 
@@ -859,6 +894,25 @@ FOREIGN = [
     "что такое квантовая запутанность",
     "как подключить react router",
     "где лежат логи systemd",
+    "где реализовано кэширование в redis",
+    "где в проекте авторизация по oauth",
+]
+
+# Обычные вопросы о проекте — те, что задал бы живой человек, а не автор
+# замера. TARGETS выше подобраны так, чтобы у каждого была ровно одна
+# функция-ответ, и это сделало их слишком удобными: у всех двенадцати
+# нашлись ВСЕ слова. Эти восемь добавлены после живого прогона, где
+# «где реализовано чтение файлов» получил отказ: слова «чтение» в коде
+# нет, есть «читает» и «чтения», а морфологии токенизатор не знает.
+EVERYDAY = [
+    "где реализовано чтение файлов",
+    "где реализован калькулятор",
+    "как работает индексация",
+    "где определяется системный промпт",
+    "как агент выбирает инструмент",
+    "где обрабатываются ошибки",
+    "как устроено хранилище векторов",
+    "где настраивается модель",
 ]
 
 
@@ -949,16 +1003,32 @@ class TestRealSearch:
         assert any(contains_definition(hit.text, "is_safe_query") for hit in found)
 
     def test_foreign_question_is_refused(self):
+        """Отказ ловит только то, у чего нет ни одного слова в проекте.
+
+        Это меньше половины посторонних вопросов, и так и должно быть:
+        правило намеренно осторожное. Остальные проходят и получают
+        обычную выдачу — то есть поведение Главы 5, не хуже, чем было.
+        """
         index = lexical_only(exclude=SELF_REFERENCE)
         refused = [question for question in FOREIGN if index.looks_absent(question)]
-        print(f"\nОтказано на {len(refused)} из {len(FOREIGN)} посторонних вопросов")
-        assert len(refused) >= len(FOREIGN) * 0.7
+        print(f"\nОтказано на {len(refused)} из {len(FOREIGN)} посторонних вопросов:")
+        for question in refused:
+            print(f"  {question}")
+        assert refused
 
-    def test_real_question_is_not_refused(self):
+    def test_no_real_question_is_refused(self):
+        """Ни одного ложного отказа — то, ради чего порог по весу выключен.
+
+        Живой прогон Главы 6 показал обратное на пороге 8.0: «где реализовано
+        чтение файлов» получил отказ, потому что слова «чтение» в коде нет.
+        """
         index = lexical_only(exclude=SELF_REFERENCE)
-        kept = [question for question, _ in TARGETS if not index.looks_absent(question)]
-        print(f"\nПропущено {len(kept)} из {len(TARGETS)} настоящих вопросов")
-        assert len(kept) == len(TARGETS)
+        questions = [question for question, _ in TARGETS] + EVERYDAY
+        refused = [question for question in questions if index.looks_absent(question)]
+        print(f"\nЛожных отказов: {len(refused)} из {len(questions)}")
+        for question in refused:
+            print(f"  ✗ {question} → {index.lexical_signal(question).render()}")
+        assert not refused
 
     def test_lexical_index_needs_no_model(self):
         """Лексическая половина собирается без сети — это и есть её главное свойство."""
@@ -1020,7 +1090,13 @@ def measure(index: HybridIndex, mode: str = "hybrid", rewrite: bool = False,
 
     for question, name in TARGETS:
         query = rewrite_module.expand_query(question, enabled=True) if rewrite else question
-        hits = index.search(query, top_k=top_k, mode=mode)
+        # Реранкеру дают БОЛЬШЕ кандидатов, чем уедет в контекст, — так же,
+        # как это делает агент (см. augment_with_code). Мерить по восьми
+        # и переставлять те же восемь бессмысленно: множество не меняется,
+        # и число попаданий тогда не может измениться в принципе — сдвинуть
+        # его способен только MRR. Первая версия этого замера так и делала.
+        candidates = RERANK_CANDIDATES if reranker else top_k
+        hits = index.search(query, top_k=candidates, mode=mode)
         if reranker:
             hits = rerank(question, hits, top_k=top_k)
 
@@ -1089,9 +1165,12 @@ class TestChapterMeasurements:
         rerank_module.clear_rerank_cache()
         index = real_hybrid(PYTHON_CORPUS)
 
-        plain, plain_mrr, plain_lines = measure(index, rewrite=True, top_k=8)
+        # Сравниваются две конфигурации, в которых агент может работать:
+        # выдача поиска как есть — и та же выдача, но пропущенная через
+        # реранкер. В обеих в контекст едет пять фрагментов, как в агенте.
+        plain, plain_mrr, plain_lines = measure(index, rewrite=True, top_k=TOP_K)
         ranked, ranked_mrr, ranked_lines = measure(
-            index, rewrite=True, reranker=True, top_k=8
+            index, rewrite=True, reranker=True, top_k=TOP_K
         )
 
         print(f"\nГибрид без реранкера: {plain}/{len(TARGETS)}, MRR {plain_mrr:.2f}")
@@ -1109,38 +1188,52 @@ class TestChapterMeasurements:
         assert True  # числа печатаются, вывод делает текст главы
 
     def test_absence_threshold(self):
-        """Замер: разделяет ли лексический вес вопросы о проекте и посторонние.
+        """Замер: чем отличить вопрос о проекте от постороннего.
 
-        Считается на ПОЛНОМ репозитории, а не на пятнадцати файлах: порог
-        привязан к размеру корпуса через IDF, и число в hybrid.py снято
-        именно здесь.
+        Главный вывод печатается последней таблицей: порога по весу,
+        который разделял бы две группы, НЕ СУЩЕСТВУЕТ — распределения
+        перекрываются. Первая версия главы утверждала обратное, потому
+        что мерила на двенадцати вопросах, у которых все слова нашлись.
         """
         index = lexical_only(exclude=SELF_REFERENCE)
         print(f"\nКорпус: {index.lexical.count()} фрагментов "
               f"(без {SELF_REFERENCE} — там лежит список вопросов этого замера)")
 
-        def row(question: str) -> tuple[float, float, str]:
-            signal = index.lexical_signal(question)
-            return signal.best, signal.support, ", ".join(signal.missing)
+        def rows(questions: list[str]) -> list[tuple[float, float, str, str]]:
+            table = []
+            for question in questions:
+                signal = index.lexical_signal(question)
+                table.append(
+                    (signal.best, signal.support, question, ", ".join(signal.missing))
+                )
+            return sorted(table)
 
-        print("\nВопросы, ответ на которые в проекте есть:")
-        inside = []
-        for question, _ in TARGETS:
-            best, support, missing = row(question)
-            inside.append(best)
-            print(f"  вес {best:6.2f}  слов найдено {support:4.0%}  | {question}")
+        inside = rows([question for question, _ in TARGETS] + EVERYDAY)
+        outside = rows(FOREIGN)
 
-        print("\nПосторонние вопросы:")
-        outside = []
-        for question in FOREIGN:
-            best, support, missing = row(question)
-            outside.append(best)
-            print(f"  вес {best:6.2f}  слов найдено {support:4.0%}  "
-                  f"нет: {missing[:34]:34} | {question}")
+        for title, table in (("ВОПРОСЫ О ПРОЕКТЕ", inside), ("ПОСТОРОННИЕ", outside)):
+            print(f"\n{title} (по возрастанию веса):")
+            for best, support, question, missing in table:
+                print(f"  вес {best:6.2f}  слов найдено {support:4.0%}  "
+                      f"| {question:48} нет: {missing[:40]}")
 
-        print(f"\nВопросы о проекте: от {min(inside):.2f} до {max(inside):.2f}")
-        print(f"Посторонние:       от {min(outside):.2f} до {max(outside):.2f}")
-        print(f"Порог в hybrid.py: {hybrid_module.NO_ANSWER_BM25}")
+        print(f"\nо проекте:   {inside[0][0]:.2f} … {inside[-1][0]:.2f}")
+        print(f"посторонние: {outside[0][0]:.2f} … {outside[-1][0]:.2f}")
+
+        print("\nПорог по весу — чем платим за каждый пойманный посторонний вопрос:")
+        print("  порог | ложных отказов | пойманных посторонних")
+        for threshold in (3, 4, 5, 6, 7, 8, 9, 10):
+            false_refusals = sum(1 for best, *_ in inside if best < threshold)
+            caught = sum(1 for best, *_ in outside if best < threshold)
+            print(f"   {threshold:4.1f} |  {false_refusals:2d} из {len(inside):2d}       "
+                  f"|  {caught:2d} из {len(outside)}")
+
+        no_words = [q for *_, q, missing in [(b, s, q, m) for b, s, q, m in outside]
+                    if index.lexical_signal(q).support == 0]
+        print(f"\nПравило «нет ни одного слова» ловит {len(no_words)} из {len(outside)} "
+              f"посторонних и не отказывает ни одному настоящему.")
+        print(f"Настройки сейчас: NO_ANSWER_SUPPORT={hybrid_module.NO_ANSWER_SUPPORT}, "
+              f"NO_ANSWER_BM25={hybrid_module.NO_ANSWER_BM25}")
 
         assert True  # числа печатаются, вывод делает текст главы
 
@@ -1188,3 +1281,31 @@ class TestDefaultMode:
         monkeypatch.setattr(hybrid_module, "DEFAULT_MODE", "magic")
         with pytest.raises(ValueError):
             hybrid.search("estimate_tokens")
+
+
+class TestQuestionFrame:
+    """Слова о форме вопроса не считаются доказательством, что ответ есть."""
+
+    def test_frame_words_are_dropped_from_content(self):
+        from chapter6.src.lexical import content_tokens
+
+        assert content_tokens("где реализован класс Тележка") == ["тележка"]
+
+    def test_frame_words_stay_in_the_index(self, hybrid):
+        """Из поиска они не выбрасываются — по ним ищут, и это полезно."""
+        from chapter6.src.lexical import tokenize_query
+
+        assert "реализован" in tokenize_query("где реализован калькулятор")
+
+    def test_code_shaped_question_can_still_be_refused(self, hybrid):
+        """Главное: без этого списка отказ не сработал бы ни разу.
+
+        Маршрутизация Главы 5 отправляет в поиск по коду именно те вопросы,
+        где есть «где», «реализован», «класс», — а они есть в любом проекте.
+        """
+        signal = hybrid.lexical_signal("где реализован класс Тележка")
+        assert signal.absent
+        assert signal.missing == ["тележка"]
+
+    def test_a_real_code_question_still_passes(self, hybrid):
+        assert not hybrid.lexical_signal("где реализовано арифметическое выражение").absent

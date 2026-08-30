@@ -79,6 +79,7 @@ from chapter6.src import (
     rerank,
     rerank_stats,
 )
+from chapter6.src import hybrid as hybrid_module
 
 # Автопоиск по коду — тот же выключатель, что в Главе 5, но своя переменная:
 # главы должны включаться независимо.
@@ -211,11 +212,19 @@ def augment_with_code(conversation: SelectiveConversation, user_input: str) -> b
     signal = index.lexical_signal(user_input)
     if not exact and signal.absent:
         print(f"🚫 Похоже, в проекте этого нет ({signal.render()})")
+        # Блок пишется как ДАННЫЕ, без единого повелительного наклонения.
+        # Живой прогон, из-за которого это переписано: в блоке стояло
+        # «Так и скажи пользователю. НЕ ВЫДУМЫВАЙ ни файлы, ни номера строк»,
+        # и модель на 3B скопировала обе фразы в ответ пользователю целиком —
+        # вместе с обращением к самой себе. Указания модели живут
+        # в системном промпте (CODE_RULES, пункт 10), а сюда едет только факт.
+        missing = ", ".join(signal.missing)
         conversation.retrieved = (
-            f"В коде проекта нет ответа на вопрос «{user_input}»: "
-            f"ни одно значимое слово вопроса в файлах проекта не встречается"
-            + (f" ({', '.join(signal.missing)})" if signal.missing else "")
-            + ". Так и скажи пользователю. НЕ ВЫДУМЫВАЙ ни файлы, ни номера строк."
+            f"Результат поиска по коду проекта: совпадений нет.\n"
+            f"Вопрос: «{user_input}».\n"
+            + (f"Слова, которых нет ни в одном файле проекта: {missing}.\n" if missing else "")
+            + f"Вес лучшего совпадения {signal.best:.1f} при пороге "
+            f"{hybrid_module.NO_ANSWER_BM25:.1f} — этого мало, чтобы считать ответ найденным."
         )
         return True
 
