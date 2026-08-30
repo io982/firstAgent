@@ -86,6 +86,7 @@ from chapter6.src import (
     rerank_stats,
 )
 from chapter6.src import hybrid as hybrid_module
+from chapter6.src.docgate import get_document_gate
 
 # Автопоиск по коду — тот же выключатель, что в Главе 5, но своя переменная:
 # главы должны включаться независимо.
@@ -337,6 +338,32 @@ def augment_with_code(conversation: SelectiveConversation, user_input: str) -> b
     return True
 
 
+def augment_with_docs(conversation: SelectiveConversation, user_input: str) -> bool:
+    """Документы Главы 4 — но сначала те же ворота отказа, что у кода.
+
+    Долг, с которым глава сначала осталась: отказ работал только в ветке
+    кода, а вопрос, не узнанный как кодовый, уезжал в документы, где нуля
+    не было. Живой прогон: «где реализоано распознование изображений»
+    с двумя опечатками не подошло под маркеры кода, ушло в документы
+    и получило выдуманный ответ про Главу 1.
+    """
+    if AUTO_RAG:
+        signal = get_document_gate().signal(user_input)
+        if signal.absent:
+            print(f"🚫 Похоже, в документах этого нет ({signal.render()})")
+            missing = ", ".join(signal.missing)
+            # Блок — данные, без повелительного наклонения: указания модели
+            # живут в системном промпте, а 3B копирует их в ответ дословно.
+            conversation.retrieved = (
+                f"Результат поиска по документам проекта: совпадений нет.\n"
+                f"Вопрос: «{user_input}».\n"
+                + (f"Слова, которых нет ни в одном документе: {missing}." if missing else "")
+            )
+            return True
+
+    return augment_with_context(conversation, user_input)
+
+
 def route(conversation: SelectiveConversation, user_input: str) -> str:
     """Выбирает, что положить в контекст: разбор, код, документы или ничего.
 
@@ -362,7 +389,7 @@ def route(conversation: SelectiveConversation, user_input: str) -> str:
             return structure
     if AUTO_CODE and augment_with_code(conversation, user_input):
         return "код"
-    if AUTO_RAG and augment_with_context(conversation, user_input):
+    if AUTO_RAG and augment_with_docs(conversation, user_input):
         return "документы"
     conversation.retrieved = ""
     return ""

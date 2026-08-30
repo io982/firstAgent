@@ -38,6 +38,7 @@ from chapter6.src.hybrid import (
 from chapter6.src.lexical import (
     MIN_TOKEN_LEN,
     STOP_TOKENS,
+    stem,
     tokenize,
     tokenize_query,
 )
@@ -180,7 +181,29 @@ class TestTokenize:
         """На этом держится порог: «как» и «где» есть в комментариях всего проекта."""
         tokens = tokenize("как приготовить борщ")
         assert "как" not in tokens
-        assert {"приготовить", "борщ"} <= set(tokens)
+        # Русские слова уходят в индекс основами: «приготовить» → «приготов».
+        assert {stem("приготовить"), stem("борщ")} <= set(tokens)
+
+    def test_index_keeps_both_the_word_and_its_stem(self):
+        """Склонения находят друг друга по основе, а точная форма остаётся.
+
+        Основа нужна ранжированию: вопрос со словом «обрезается» должен
+        находить докстроку со словом «обрезает». Точная форма нужна отказу:
+        он спрашивает, встречается ли слово в проекте вообще, и по основе
+        ответил бы мягче, чем надо.
+        """
+        assert set(tokenize("чтения")) == {"чтения", stem("чтения")}
+        # Разные склонения делят основу — по ней они и находят друг друга.
+        assert stem("чтение") == stem("чтения")
+
+    def test_identifier_gets_no_stem(self):
+        """У латиницы основы нет: `query` не должен стать `queri`."""
+        assert tokenize("query") == ["query"]
+
+    def test_identifiers_are_not_stemmed(self):
+        """Латиница не трогается: `query` не должен стать `queri`."""
+        assert "query" in tokenize("is_safe_query")
+        assert stem("query") == "query"
 
     def test_short_tokens_are_dropped(self):
         assert all(len(token) >= MIN_TOKEN_LEN for token in tokenize("a i x ab"))
@@ -1305,13 +1328,15 @@ class TestQuestionFrame:
     def test_frame_words_are_dropped_from_content(self):
         from chapter6.src.lexical import content_tokens
 
+        # Для отказа берётся ТОЧНАЯ форма, а не основа: он отвечает
+        # на вопрос «встречается ли это слово в проекте вообще».
         assert content_tokens("где реализован класс Тележка") == ["тележка"]
 
     def test_frame_words_stay_in_the_index(self, hybrid):
         """Из поиска они не выбрасываются — по ним ищут, и это полезно."""
         from chapter6.src.lexical import tokenize_query
 
-        assert "реализован" in tokenize_query("где реализован калькулятор")
+        assert stem("реализован") in tokenize_query("где реализован калькулятор")
 
     def test_code_shaped_question_can_still_be_refused(self, hybrid):
         """Главное: без этого списка отказ не сработал бы ни разу.
@@ -1585,3 +1610,54 @@ class TestEmbeddingModelSwitch:
         from chapter5.src.codebase import code_collection
 
         assert code_collection() == "chapter5_code_bge_m3"
+
+
+class TestDocumentGate:
+    """Отказ для корпуса документов — тот же приём, что для кода.
+
+    Долг, с которым глава сначала осталась: отказ работал только в ветке
+    кода. Живой прогон показал, чем это оборачивается — вопрос с двумя
+    опечатками не подошёл под маркеры кода, ушёл в документы и получил
+    выдуманный ответ.
+    """
+
+    @pytest.fixture
+    def docs(self, tmp_path):
+        from chapter4.src.knowledge import KnowledgeBase
+        from chapter6.src.docgate import DocumentGate
+
+        folder = tmp_path / "docs"
+        folder.mkdir()
+        (folder / "budget.md").write_text(
+            "# Бюджет контекста\n\nИстория разговора обрезается по весу в токенах.\n",
+            encoding="utf-8",
+        )
+        gate = DocumentGate(base=KnowledgeBase(store=MemoryVectorStore(None), docs_dir=folder))
+        gate.sync()
+        return gate
+
+    def test_question_about_documents_passes(self, docs):
+        assert not docs.looks_absent("как обрезается история разговора")
+
+    def test_foreign_question_is_refused(self, docs):
+        signal = docs.signal("как испечь шарлотку")
+        assert signal.absent
+        assert "шарлотку" in signal.missing
+
+    def test_question_frame_is_not_evidence(self, docs):
+        """«Расскажи», «что такое», «глава» есть в любой документации."""
+        assert docs.looks_absent("расскажи, что такое кубернетес")
+
+    def test_class_and_method_are_content_here(self, docs):
+        """В вопросе к документам «класс» — предмет, а не форма вопроса."""
+        assert "класс" in docs.content_tokens("что написано про класс")
+
+    def test_empty_corpus_does_not_crash(self, tmp_path):
+        from chapter4.src.knowledge import KnowledgeBase
+        from chapter6.src.docgate import DocumentGate
+
+        gate = DocumentGate(
+            base=KnowledgeBase(store=MemoryVectorStore(None), docs_dir=tmp_path / "нет")
+        )
+        assert gate.sync() == 0
+        assert not gate.looks_absent("любой вопрос")

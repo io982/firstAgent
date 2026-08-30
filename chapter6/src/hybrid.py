@@ -219,7 +219,10 @@ class HybridIndex:
         значит не отказать никогда (см. QUESTION_FRAME_TOKENS).
         """
         tokens = content_tokens(query)
-        if not tokens or not self.lexical.count():
+        if not self.lexical.count():
+            # Индекса нет — это «искать негде», а не «ответа не существует».
+            return Signal()
+        if not tokens:
             return Signal(tokens=tokens, missing=tokens)
 
         missing = [token for token in tokens if not self.lexical.document_frequency(token)]

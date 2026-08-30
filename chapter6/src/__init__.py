@@ -38,6 +38,12 @@ if not os.environ.get("AGENT_EMBED_MODEL"):
 # однажды закэширует имя модели на уровне модуля.
 
 from .bm25 import K1, B, BM25Index  # noqa: E402
+from .docgate import (  # noqa: E402
+    DOC_FRAME_TOKENS,
+    DocumentGate,
+    get_document_gate,
+    set_document_gate,
+)
 from .fusion import RRF_K, fuse, rrf, weighted_sum  # noqa: E402
 from .hybrid import (  # noqa: E402
     BM25_CANDIDATES,
@@ -59,7 +65,9 @@ from .lexical import (  # noqa: E402
     RU_STOP_TOKENS,
     STOP_TOKENS,
     content_tokens,
+    forms,
     keep,
+    stem,
     tokenize,
     tokenize_query,
 )
@@ -83,6 +91,12 @@ __all__ = [
     "CODE_STOP_TOKENS",
     "QUESTION_FRAME_TOKENS",
     "content_tokens",
+    "forms",
+    "stem",
+    "DocumentGate",
+    "DOC_FRAME_TOKENS",
+    "get_document_gate",
+    "set_document_gate",
     "RU_STOP_TOKENS",
     "keep",
     "tokenize",
