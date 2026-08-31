@@ -9,4 +9,7 @@ chapter3/previous_session.log
 # Остатки выброшенной core-памяти: файлы могли создаться до переделки
 chapter3/core_memory.json
 chapter3/core_memory.log
+# Снимок прогона графа (Глава 7): внутри реплики пользователя и найденные
+# фрагменты — то самое, что Глава 5 училась не пускать в индекс.
+chapter7/checkpoint.json
 .claude/

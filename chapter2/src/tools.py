@@ -97,12 +97,30 @@ def get_weather(city: str) -> str:
 
 # === API ДЛЯ АГЕНТА ===
 
-def get_all_tools_schemas() -> list[dict[str, Any]]:
-    """Возвращает список JSON Schema всех зарегистрированных инструментов."""
-    return [info["schema"] for info in TOOL_REGISTRY.values()]
+def selected_tools(only: list[str] | None = None) -> list[str]:
+    """Имена инструментов реестра — все или только названные.
 
-def describe_tools() -> str:
-    """Собирает описание всех инструментов для системного промпта.
+    Одно место, где решается вопрос «какие инструменты видит агент».
+    До Главы 7 ответ был один на всех: реестр целиком. Глава 7 собирает
+    из одного реестра нескольких специалистов, и каждому нужна своя
+    выборка — поэтому фильтр живёт здесь, а не у каждого вызывающего.
+
+    Порядок берётся из реестра, а не из `only`: промпт не должен меняться
+    от того, в каком порядке перечислены имена. Имя, которого в реестре
+    нет, молча пропускается — вызывающий видит это по длине результата,
+    а агент не падает из-за опечатки в списке.
+    """
+    if only is None:
+        return list(TOOL_REGISTRY.keys())
+    wanted = set(only)
+    return [name for name in TOOL_REGISTRY if name in wanted]
+
+def get_all_tools_schemas(only: list[str] | None = None) -> list[dict[str, Any]]:
+    """Возвращает список JSON Schema инструментов — всех или выбранных."""
+    return [TOOL_REGISTRY[name]["schema"] for name in selected_tools(only)]
+
+def describe_tools(only: list[str] | None = None) -> str:
+    """Собирает описание инструментов для системного промпта.
 
     Читает реестр В МОМЕНТ ВЫЗОВА, а не при импорте модуля. Это важно:
     Глава 3 регистрирует свои инструменты позже, и если бы описание
@@ -110,9 +128,12 @@ def describe_tools() -> str:
 
     В сигнатуре печатаются имена параметров — иначе модель узнаёт их
     только из few-shot примеров и начинает выдумывать свои.
+
+    `only` ограничивает описание выбранными именами. По умолчанию None —
+    описываются все, и промпты глав 2-6 от появления фильтра не меняются.
     """
     lines = []
-    for info in get_all_tools_schemas():
+    for info in get_all_tools_schemas(only):
         fn = info["function"]
         params = ", ".join(fn["parameters"]["properties"].keys())
         lines.append(f"- {fn['name']}({params}): {fn['description']}")
@@ -147,7 +168,7 @@ def execute_tool(tool_name: str, arguments: dict[str, Any]) -> str:
 
 # === CONSTRAINED DECODING: СХЕМА ОТВЕТА АГЕНТА ===
 
-def build_response_schema() -> dict[str, Any]:
+def build_response_schema(only: list[str] | None = None) -> dict[str, Any]:
     """Собирает JSON Schema ответа агента по текущему содержимому реестра.
 
     Схема уходит в Ollama параметром `format`. Дальше модель генерирует не
@@ -164,7 +185,28 @@ def build_response_schema() -> dict[str, Any]:
 
         action = "tool_call"     -> заполнены name и arguments
         action = "final_answer"  -> заполнен answer
+
+    `only` сужает enum до выбранных инструментов. Это не косметика:
+    специалист Главы 7, которому не дали remember, не может его назвать
+    физически — грамматика декодирования не разрешит такие токены.
+
+    Инструментов не выбрано ни одного — из схемы уходит и сам вариант
+    `tool_call`. Пустой `enum` был бы не «нет инструментов», а «здесь
+    не подходит ни одна строка», и грамматике декодирования такое
+    описание нечем удовлетворить. Агент без инструментов умеет ровно
+    одно — ответить, и схема должна говорить именно это.
     """
+    names = selected_tools(only)
+    if not names:
+        return {
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "enum": ["final_answer"]},
+                "answer": {"type": "string"},
+            },
+            "required": ["action", "answer"],
+        }
+
     return {
         "type": "object",
         "properties": {
@@ -174,7 +216,7 @@ def build_response_schema() -> dict[str, Any]:
             },
             "name": {
                 "type": "string",
-                "enum": list(TOOL_REGISTRY.keys()),
+                "enum": names,
             },
             "arguments": {"type": "object"},
             "answer": {"type": "string"},

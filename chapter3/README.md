@@ -396,8 +396,8 @@ python -m chapter3.agent
 **Задание: соберите своего агента на базе Глав 1–3.** Не форк курса, а отдельный проект, куда вы переносите устройство, а не текст. Что в нём должно быть:
 
 * цикл ReAct с лимитом итераций, где ошибка инструмента возвращается модели наблюдением, а не роняет процесс — [`chapter1/agent.py`](../chapter1/agent.py);
-* минимум два своих инструмента через `@tool` — один реестр, никаких `if tool_name == ...` — [`tool`](../chapter2/src/tools.py#L19), [`execute_tool`](../chapter2/src/tools.py#L128);
-* строгий JSON-ответ: схема, собранная из реестра, плюс `response_format` — [`build_response_schema`](../chapter2/src/tools.py#L150);
+* минимум два своих инструмента через `@tool` — один реестр, никаких `if tool_name == ...` — [`tool`](../chapter2/src/tools.py#L19), [`execute_tool`](../chapter2/src/tools.py#L149);
+* строгий JSON-ответ: схема, собранная из реестра, плюс `response_format` — [`build_response_schema`](../chapter2/src/tools.py#L171);
 * история между репликами и обрезка по весу в токенах, а не по числу сообщений — [`Conversation`](src/context.py#L282), [`trim_by_tokens`](src/context.py#L87);
 * хотя бы один вид памяти между запусками: факты на диске ([`memory.py`](src/memory.py)) или пересказ прошлой сессии ([`previous_session.py`](src/previous_session.py));
 * всё, что пришло извне, — в тегах и с проверкой на инъекции ([`security.py`](src/security.py));

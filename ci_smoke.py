@@ -20,7 +20,7 @@ if hasattr(sys.stdout, "reconfigure"):
 
 # Документы, которые проверяем. Черновики ненаписанных глав сюда не входят:
 # там ссылки указывают на код, которого ещё нет.
-DOCS = ["README.md", "ROADMAP.md"] + [f"chapter{n}/README.md" for n in range(7)]
+DOCS = ["README.md", "ROADMAP.md"] + [f"chapter{n}/README.md" for n in range(8)]
 
 MARKDOWN_LINK = re.compile(r"\[([^\]]*)\]\(([^)\s]+)\)")
 FENCED_CODE = re.compile(r"```.*?```", re.DOTALL)
@@ -112,6 +112,7 @@ chapters = [
     "chapter4/tests.py",
     "chapter5/tests.py",
     "chapter6/tests.py",
+    "chapter7/tests.py",
 ]
 
 failed = []
