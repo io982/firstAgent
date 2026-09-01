@@ -34,7 +34,7 @@
 | [Глава 4](chapter4/README.md) | RAG: эмбеддинги, векторный поиск, база знаний из ваших документов | [chapter4/agent.py](chapter4/agent.py) |
 | [Глава 5](chapter5/README.md) | Code RAG: нарезка кода по определениям, карта проекта, поиск с адресом `файл:строки` | [chapter5/agent.py](chapter5/agent.py) |
 | [Глава 6](chapter6/README.md) | Улучшаем поиск: ответ «в проекте этого нет», реранкер и модель эмбеддингов, которая решала больше всего | [chapter6/agent.py](chapter6/agent.py) |
-| [Глава 7](chapter7/README.md) | Команда специалистов: пять агентов из одного реестра, граф с откатом, чекпоинт | [chapter7/agent.py](chapter7/agent.py) |
+| [Глава 7](chapter7/README.md) | Команда специалистов: пять ролей из одного реестра, граф с откатом, чекпоинт | [chapter7/agent.py](chapter7/agent.py) |
 
 
 ## 🎯 Чему вы научитесь
