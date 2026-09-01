@@ -1853,8 +1853,8 @@ class TestUtilityAcrossModels:
 
 @pytest.mark.slow
 class TestModelSwitch:
-    def test_price_of_alternating_two_models(self):
-        """Помещаются ли две модели на этой машине — и что стоит чередование.
+    def test_price_of_alternating_a_big_second_model(self):
+        """Вторая модель вдвое тяжелее первой — что стоит чередование.
 
         Числа отсюда — единственное основание раздавать специалистам разные
         модели. Без них это решение принимается по картинке из статьи.
@@ -1863,12 +1863,37 @@ class TestModelSwitch:
         print(f"\nВ памяти до замера: {models_module.loaded_models()}")
         result = models_module.switch_cost(base.MODEL, second, rounds=2)
         print(
-            f"Та же модель подряд: {result['same']} с; "
-            f"после чужой: {result['switched']} с; "
-            f"моделей в памяти после замера: {result['loaded']}"
+            f"Окно {result['num_ctx']}: та же модель подряд {result['same']} с; "
+            f"после чужой {result['switched']} с; "
+            f"моделей в памяти после замера {result['loaded']}"
         )
-        print(f"В памяти после замера: {models_module.loaded_models()}")
+        print(f"Видеопамять по моделям: {models_module.vram_usage()}")
         assert result["same"] > 0
+
+    def test_two_small_models_and_the_window(self):
+        """Помещаются ли ДВЕ маленькие модели — и от чего это зависит.
+
+        Первая версия замера мерила только окно 8192 и с моделью на 7B,
+        а вывод был записан широко: «разные модели на 6 ГБ не помещаются».
+        Вывод оказался про конфигурацию, а не про железо.
+
+        Место в видеопамяти занимает не вес модели, а вес плюс KV-кэш,
+        и кэш растёт с окном. Замер прогоняет одну и ту же пару моделей
+        при двух окнах и печатает, сколько моделей осталось в памяти.
+        """
+        second = "qwen2_5coder3b_q5:latest"
+        for num_ctx in (8192, 2048):
+            result = models_module.switch_cost(
+                base.MODEL, second, rounds=2, num_ctx=num_ctx
+            )
+            print(
+                f"\nОкно {num_ctx}: та же модель {result['same']} с, "
+                f"после чужой {result['switched']} с, "
+                f"в памяти {result['loaded']} модели(ей)"
+            )
+            for name, gigabytes in models_module.vram_usage().items():
+                print(f"    {name}: {gigabytes} ГБ видеопамяти")
+        assert True  # числа печатаются, вывод делает текст главы
 
 
 @pytest.mark.slow

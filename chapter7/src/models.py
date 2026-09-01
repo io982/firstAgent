@@ -86,23 +86,48 @@ def loaded_models() -> list[str]:
         return []
 
 
-def switch_cost(first: str, second: str, rounds: int = 3) -> dict[str, float]:
-    """Цена чередования двух моделей: секунды на один и тот же запрос.
+def switch_cost(
+    first: str, second: str, rounds: int = 3, num_ctx: int | None = None
+) -> dict[str, float]:
+    """Сколько секунд добавляет чередование двух моделей.
 
     Меряется самый короткий запрос, какой можно придумать, — чтобы
     в измеренное время попало переключение, а не генерация. Сначала обе
     модели прогреваются, потом идут `rounds` чередований.
 
-    Возвращает медианы: «своя» (тот же вопрос той же модели подряд)
-    и «чужая» (после работы другой модели). Их разница и есть цена
-    переключения на этой машине.
+    `num_ctx` — размер окна на время замера, и это САМЫЙ ВАЖНЫЙ здесь
+    аргумент. Место в видеопамяти занимает не только вес модели, но и
+    KV-кэш, а он растёт с окном. Первая версия замера окно не трогала,
+    мерила на 8192 и дала вывод «две модели на 6 ГБ не помещаются».
+    Вывод оказался слишком широким: на 2048 две модели по 3B уживаются,
+    и чередование перестаёт что-либо добавлять.
+
+    Возвращает медианы: `same` — тот же запрос той же модели подряд,
+    `switched` — после работы другой модели, и `loaded` — сколько моделей
+    Ollama держит в памяти после замера. Именно `loaded` объясняет
+    разницу между первыми двумя: две в памяти — чередование бесследно,
+    одна — каждое переключение это загрузка.
     """
     probe = [{"role": "user", "content": "Ответь одним словом: да"}]
+    options = {"num_ctx": num_ctx} if num_ctx else None
 
     def ask(model: str) -> float:
         started = time.time()
         with using_model(model):
-            request_model(probe)
+            if options:
+                requests.post(
+                    f"{OLLAMA_BASE}/api/chat",
+                    json={
+                        "model": model,
+                        "messages": probe,
+                        "stream": False,
+                        "keep_alive": base.KEEP_ALIVE,
+                        "options": {"temperature": 0.1, **options},
+                    },
+                    timeout=180,
+                ).raise_for_status()
+            else:
+                request_model(probe)
         return time.time() - started
 
     # Прогрев: первый запрос к модели включает загрузку с диска, и мерить
@@ -122,4 +147,24 @@ def switch_cost(first: str, second: str, rounds: int = 3) -> dict[str, float]:
         "same": round(statistics.median(same), 2),
         "switched": round(statistics.median(switched), 2),
         "loaded": len(loaded_models()),
+        "num_ctx": num_ctx or base.NUM_CTX,
     }
+
+
+def vram_usage() -> dict[str, float]:
+    """Сколько видеопамяти занимает каждая загруженная модель, в гигабайтах.
+
+    Ollama сообщает это в `/api/ps` полем `size_vram`, и оно заметно
+    больше веса модели на диске: сверху идёт KV-кэш, чей размер зависит
+    от окна. Именно из-за него ответ на вопрос «поместятся ли две модели»
+    зависит не от их веса, а от `num_ctx`.
+    """
+    try:
+        response = requests.get(f"{OLLAMA_BASE}/api/ps", timeout=5)
+        response.raise_for_status()
+        return {
+            item.get("name", ""): round(item.get("size_vram", 0) / 1e9, 2)
+            for item in response.json().get("models", [])
+        }
+    except Exception:  # noqa: BLE001
+        return {}
