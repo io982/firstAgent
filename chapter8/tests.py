@@ -54,6 +54,7 @@ from chapter8.src.edits import (
     filled_bodies,
     lost_definitions,
     missing_fields,
+    same_code,
     syntax_ok,
     unified,
     without_docstring,
@@ -2245,6 +2246,26 @@ class TestScaffoldAsked:
         assert any("py_compile" in " ".join(command) for command in seen)
 
 
+class TestSameCode:
+    """Отличать правку от её видимости — и не спутать с настоящей правкой отступа."""
+
+    def test_пустые_строки_разницей_не_считаются(self):
+        assert same_code("a = 1\n", "a = 1\n\n\n")
+
+    def test_хвостовые_пробелы_тоже(self):
+        assert same_code("a = 1\n", "a = 1   \n")
+
+    def test_изменённый_код_виден(self):
+        assert not same_code("a = 1\n", "a = 2\n")
+
+    def test_сбитый_отступ_это_настоящая_правка(self):
+        """Слева пробелы не трогаем: в Python это ошибка, а не оформление."""
+        assert not same_code("def f():\n    return 1\n", "def f():\n        return 1\n")
+
+    def test_дописанная_строка_видна(self):
+        assert not same_code("a = 1\n", "a = 1\nb = 2\n")
+
+
 class TestFilledBodies:
     """Разбор кода вместо поиска по словам: `...` бывает и внутри описания."""
 
@@ -2704,21 +2725,84 @@ class TestPipelineRun:
         assert not state.extra["tests_green"]
         assert not (workspace / "app.py").exists(), "наполовину сделанная работа хуже несделанной"
 
-    def test_неприменимая_правка_даёт_ещё_круг_без_тестов(self, project, monkeypatch, fix_plan):
-        ran = []
+    def test_неприменимая_правка_переспрашивается_в_том_же_шаге(self, project, monkeypatch, fix_plan):
+        """Осечка правки не должна останавливать прогон.
+
+        Живой прогон: три задачи подряд кончились «якорь в файле
+        не найден» и остановкой — модель придумала строку, которой
+        в файле нет, и второго шанса ей никто не дал. Цикл починки эту
+        дыру не закрывает: он чинит красную проверку, а провалившийся
+        шаг уводит прогон в «проверить нечем», мимо починки.
+        """
         monkeypatch.setattr(pipeline, "request_model", fake_model([
             anchor_answer("calc_mod.py", "такого текста нет", "x"),
             edit_answer("calc_mod.py", 2, 2, "    return a + b"),
         ]))
-        results = iter([False, True, True])
+        monkeypatch.setattr(pipeline, "execute", fake_run(green=True))
+
+        state = pipeline.run_pipeline("почини сложение", plan=fix_plan)
+        assert state.extra["tests_green"]
+        assert not state.extra.get("failed_steps"), "вторая попытка легла, шаг сделан"
+        assert state.steps.count("edit") == 0, "чинить нечего: проверка зелёная"
+        assert "return a + b" in (project / "calc_mod.py").read_text(encoding="utf-8")
+
+    def test_модель_видит_чем_не_годилась_прошлая_правка(self, project, monkeypatch, fix_plan):
+        """Отказ инструмента подробен, и передать его обратно — весь смысл."""
+        model = fake_model([
+            anchor_answer("calc_mod.py", "такого текста нет", "x"),
+            edit_answer("calc_mod.py", 2, 2, "    return a + b"),
+        ])
+        monkeypatch.setattr(pipeline, "request_model", model)
+        monkeypatch.setattr(pipeline, "execute", fake_run(green=True))
+        pipeline.run_pipeline("почини сложение", plan=fix_plan)
+
+        second = model.seen[1][-1]["content"]
+        assert "Якорь в файле не найден" in second
+        assert "return a - b" in second, "и похожая строка из файла, которую инструмент нашёл сам"
+
+    def test_пустая_правка_работой_не_считается(self, project, monkeypatch, fix_plan):
+        """Якорь, заменённый сам на себя, — не правка, а её видимость.
+
+        Живой прогон на задаче «исправь NameError» три раза подряд дал
+        ответ, в котором `new` повторял исходную строку. Инструмент
+        честно писал «заменено одно вхождение», журнал считал изменение,
+        шаг засчитывался — и агент рапортовал «Готово» об ошибке,
+        которая никуда не делась. Пустая правка хуже отказа: отказ виден.
+        """
+        same = anchor_answer("calc_mod.py", "return a - b", "return a - b\n")
+        model = fake_model([same, edit_answer("calc_mod.py", 2, 2, "    return a + b")])
+        monkeypatch.setattr(pipeline, "request_model", model)
+        monkeypatch.setattr(pipeline, "execute", fake_run(green=True))
+
+        state = pipeline.run_pipeline("почини сложение", plan=fix_plan)
+        assert not state.extra.get("failed_steps"), "вторая попытка была настоящей правкой"
+        assert "return a + b" in (project / "calc_mod.py").read_text(encoding="utf-8")
+        assert "ничего не изменила" in model.seen[1][-1]["content"]
+
+    def test_обе_попытки_мимо_это_провал_шага(self, project, monkeypatch, fix_plan):
+        before = (project / "calc_mod.py").read_text(encoding="utf-8")
+        monkeypatch.setattr(pipeline, "request_model",
+                            fake_model([anchor_answer("calc_mod.py", "такого текста нет", "x")] * 2))
+        monkeypatch.setattr(pipeline, "execute", fake_run(green=True))
+
+        state = pipeline.run_pipeline("почини сложение", plan=fix_plan)
+        assert state.extra["failed_steps"]
+        assert (project / "calc_mod.py").read_text(encoding="utf-8") == before
+
+    def test_красная_проверка_после_правки_даёт_ещё_круг(self, project, monkeypatch, fix_plan):
+        """А вот это уже работа цикла починки: правка легла, тесты красные."""
+        ran = []
+        monkeypatch.setattr(pipeline, "request_model", fake_model([
+            edit_answer("calc_mod.py", 2, 2, "    return a * b"),
+            edit_answer("calc_mod.py", 2, 2, "    return a + b"),
+        ]))
+        results = iter([False, True])
         monkeypatch.setattr(pipeline, "execute",
                             lambda c, timeout=None: (ran.append(c),
                                                      Run(c, 0 if next(results) else 1, "E fail", "", 0.2))[1])
         state = pipeline.run_pipeline("почини сложение", plan=fix_plan)
         assert state.extra["tests_green"]
-        # Узел `edit` отработал один раз: первая правка была ШАГОМ ПЛАНА
-        # и не легла, поэтому проверка её и не увидела.
-        assert state.steps.count("edit") == 1
+        assert state.steps.count("edit") == 1, "один круг починки"
         assert len(ran) == 2, "первая проверка после шагов, вторая после починки"
 
     def test_отказ_человека_останавливает_до_первого_действия(self, project, monkeypatch, fix_plan):
