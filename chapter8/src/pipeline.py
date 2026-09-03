@@ -59,6 +59,7 @@ import json
 import keyword
 import os
 import re
+import textwrap
 from contextlib import contextmanager
 
 import chapter1.agent as base
@@ -595,8 +596,14 @@ def _step_search(step, state: State) -> tuple[bool, str]:
     except guard.OutsideWorkspace as exc:
         return False, str(exc)
     if named.is_file():
-        state.extra["path"] = guard.relative(named)
-        return True, f"файл {guard.relative(named)}"
+        path = guard.relative(named)
+        state.extra["path"] = path
+        # Файл известен — но не функция, а правим мы её. Первая версия
+        # здесь выходила сразу: «человек назвал файл, вопрос решён».
+        # Вопроса было два, и решён был только первый: карта нужна
+        # ровно затем, чтобы сузить файл до определения.
+        _remember_place(state, codemap.choose(state.user_input, path))
+        return True, f"файл {path}"
 
     found = search_files(target, "*.py")
     path = _first_path(found)
@@ -959,6 +966,23 @@ def _step_edit(step, state: State) -> tuple[bool, str]:
     state.retrieved = read_lines(path, "1", str(CONTEXT_LINES))
     state.extra["path"] = path
 
+    # Место известно с точностью до функции — правим её одну. Модели
+    # не нужен адрес: границы известны из разбора, и она пишет только
+    # тело. Форма, у которой нет способа промахнуться мимо места.
+    place = state.extra.get("place")
+    if place and place.get("path") == path:
+        problem = ""
+        for _ in range(EDIT_ATTEMPTS):
+            ok, result = _edit_function(state, place, step.detail, problem)
+            if ok:
+                state.extra["edit_form"] = "function"
+                return True, result
+            problem = result
+        # Функцию переписать не вышло — пробуем обычными формами.
+        # Отказываться совсем нельзя: место могло быть выбрано неверно,
+        # и тогда правка нужна не там, куда мы целились.
+        state.extra.setdefault("log", []).append(f"правка функции не удалась: {problem}")
+
     problem = ""
     forms: tuple[str, ...] | None = None
     for _ in range(EDIT_ATTEMPTS):
@@ -1001,6 +1025,89 @@ def _file_text(path: str) -> str:
         return guard.resolve_path(path).read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError, guard.OutsideWorkspace):
         return ""
+
+
+FUNCTION_RULES = """Ты переписываешь ОДНУ функцию целиком, от `def` до последней строки.
+
+Правила:
+1. В поле content — только эта функция. Ни импортов, ни соседних функций,
+   ни строк файла вокруг неё.
+2. Начинай с `def` (или с `@декоратора`, если он был) и сохрани имя
+   и аргументы, если задача не просит их изменить.
+3. Отступы внутри функции — как в исходной: если она была методом
+   с четырьмя пробелами слева, оставь их.
+4. Код должен работать как есть: без заглушек, без TODO, без «...».
+5. Пользуйся только тем, что функции доступно, — её аргументами,
+   импортами файла и другими функциями файла. Имя, взятое из ниоткуда,
+   уронит программу при запуске."""
+
+
+def _edit_function(state: State, place: dict, detail: str, problem: str = "") -> tuple[bool, str]:
+    """Правит ОДНУ функцию: показывает модели её одну и заменяет по строкам.
+
+    Ради этого и заводилась карта кода. Обычная правка требует
+    от модели адреса: процитировать якорь (промахивается), назвать
+    номера строк (считает неверно) или перепечатать файл целиком
+    (теряет чужой код). Здесь адрес не нужен вовсе — границы функции
+    известны из разбора, и модели остаётся написать только её тело.
+
+    Возвращается пара «получилось, что сказать», как у остальных шагов.
+    """
+    path = place["path"]
+    source = _function_source(path, place)
+    if not source:
+        return False, f"функция {place['name']} в {path} больше не находится"
+
+    user = (
+        f"{_neighbours(state)}"
+        f"СЕЙЧАС НУЖНА ОДНА ФУНКЦИЯ: {place['name']} из файла {path}\n"
+        f"Вот она целиком:\n{source}\n"
+    )
+    if problem:
+        user += f"\nПрошлая попытка не годится: {problem}\n"
+    if detail and detail.strip() != state.user_input.strip():
+        user += f"\nПодсказка из плана: {detail}\n"
+    user += f"\nЗАДАЧА ЦЕЛИКОМ — делай ровно её, ничего не упуская:\n{state.user_input}\n"
+
+    answer, trouble = _ask_file(FUNCTION_RULES, user, file_schema())
+    if trouble:
+        return False, f"модель не переписала функцию: {trouble}"
+
+    content = _strip_fences(str(answer.get("content", "")))
+    if not content.strip():
+        return False, "модель вернула пустую функцию"
+
+    # Имя проверяется до записи. Модель, которой показали одну функцию,
+    # иногда возвращает соседнюю — а `replace_lines` подставит что дали
+    # ровно на место старой, и файл молча лишится определения.
+    short = place["name"].rsplit(".", 1)[-1]
+    if short not in definitions(path, textwrap.dedent(content)):
+        return False, f"в ответе нет функции {short}, а заменять надо её"
+
+    touched = guard.change_count()
+    result = replace_lines(path, str(place["start"]), str(place["end"]), content)
+    if guard.change_count() == touched:
+        return False, result
+    _remember(state, path)
+    return True, result
+
+
+def _function_source(path: str, place: dict) -> str:
+    """Текст функции по её границам — прямо с диска, а не из состояния.
+
+    С диска, потому что между выбором места и правкой файл мог
+    измениться: предыдущим шагом того же плана или человеком в соседнем
+    окне. Границы при этом остаются верными в подавляющем большинстве
+    случаев, а вот текст — нет.
+    """
+    try:
+        lines = guard.resolve_path(path).read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeDecodeError, guard.OutsideWorkspace):
+        return ""
+    start, end = int(place["start"]), int(place["end"])
+    if start < 1 or end > len(lines):
+        return ""
+    return "\n".join(lines[start - 1: end])
 
 
 def _step_test(step, state: State) -> tuple[bool, str]:

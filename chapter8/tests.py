@@ -3875,6 +3875,92 @@ class TestChoosePlace:
         assert called == [], "выбирать не из чего — спрашивать не о чем"
 
 
+class TestEditFunction:
+    """Правка ОДНОЙ функции по её границам — форма, у которой нет адреса.
+
+    Обычная правка требует от модели адреса: процитировать якорь
+    (промахивается), назвать номера строк (считает неверно) или
+    перепечатать файл целиком (теряет чужой код). Здесь адрес не нужен:
+    границы известны из разбора, и модели остаётся написать тело.
+    """
+
+    MODULE = (
+        "import math\n"
+        "\n\n"
+        "def get_roots(a, b, c):\n"
+        "    return a\n"
+        "\n\n"
+        "def main():\n"
+        "    print(get_roots(1, 2, 3))\n"
+    )
+
+    @pytest.fixture
+    def project_map(self, workspace, monkeypatch):
+        (workspace / "app.py").write_text(self.MODULE, encoding="utf-8")
+        codemap.forget_cache()
+        place = codemap.Definition("app.py", "main", "", 7, 8, "функция")
+        monkeypatch.setattr(codemap, "choose", lambda task, path="": place)
+        return workspace
+
+    def test_модели_показывают_одну_функцию(self, project_map, monkeypatch):
+        model = fake_model([file_answer("def main():\n    print('готово')\n")])
+        monkeypatch.setattr(pipeline, "request_model", model)
+        state = started(Plan("з", [Step("search", "app.py", ""), Step("edit", "", "")]))
+        pipeline.node_step(state)
+        pipeline.node_step(state)
+
+        asked = model.seen[0][-1]["content"]
+        assert "СЕЙЧАС НУЖНА ОДНА ФУНКЦИЯ: main" in asked
+        assert "def main():" in asked
+        assert "def get_roots" not in asked.split("Вот она целиком:")[1], "соседняя функция не нужна"
+
+    def test_функция_заменяется_по_своим_границам(self, project_map, monkeypatch):
+        monkeypatch.setattr(pipeline, "request_model",
+                            fake_model([file_answer("def main():\n    print('готово')\n")]))
+        state = started(Plan("з", [Step("search", "app.py", ""), Step("edit", "", "")]))
+        pipeline.node_step(state)
+        pipeline.node_step(state)
+
+        written = (project_map / "app.py").read_text(encoding="utf-8")
+        assert "print('готово')" in written
+        assert "def get_roots(a, b, c):" in written, "соседняя функция на месте"
+        assert state.extra["edit_form"] == "function"
+
+    def test_ответ_без_нужной_функции_отвергается(self, project_map, monkeypatch):
+        """Модель, которой показали одну функцию, иногда возвращает соседнюю."""
+        wrong = file_answer("def get_roots(a, b, c):\n    return 42\n")
+        monkeypatch.setattr(pipeline, "request_model", fake_model([wrong, wrong]))
+        state = started(Plan("з", [Step("search", "app.py", ""), Step("edit", "", "")]))
+        pipeline.node_step(state)
+        pipeline.node_step(state)
+
+        assert (project_map / "app.py").read_text(encoding="utf-8") == self.MODULE
+        assert "нет функции main" in " ".join(state.extra["log"])
+
+    def test_не_вышло_с_функцией_значит_обычная_правка(self, project_map, monkeypatch):
+        """Место могло быть выбрано неверно — тогда правка нужна не там."""
+        wrong = file_answer("x = 1\n")
+        model = fake_model([wrong, wrong,
+                            anchor_answer("app.py", "    return a", "    return a * 2")])
+        monkeypatch.setattr(pipeline, "request_model", model)
+        state = started(Plan("з", [Step("search", "app.py", ""), Step("edit", "", "")]))
+        pipeline.node_step(state)
+        pipeline.node_step(state)
+
+        assert "return a * 2" in (project_map / "app.py").read_text(encoding="utf-8")
+        assert len(model.seen) == 3, "две попытки функцией, потом обычная форма"
+
+    def test_исчезнувшая_функция_не_роняет_шаг(self, project_map, monkeypatch):
+        """Между выбором места и правкой файл могли переписать."""
+        monkeypatch.setattr(codemap, "choose",
+                            lambda task, path="": codemap.Definition("app.py", "main", "", 500, 501, "функция"))
+        monkeypatch.setattr(pipeline, "request_model", fake_model([file_answer("x = 1\n")] * 3))
+        state = started(Plan("з", [Step("search", "app.py", ""), Step("edit", "", "")]))
+        pipeline.node_step(state)
+        pipeline.node_step(state)
+        assert "больше не находится" in " ".join(state.extra["log"])
+
+
 class TestSearchByMap:
     """Шаг поиска: путь, потом текст, потом карта."""
 
@@ -3906,14 +3992,23 @@ class TestSearchByMap:
         assert asked == ["calc_mod.py"], "файл известен — сужаем список до него"
         assert state.extra["place"]["name"] == "add"
 
-    def test_путь_в_шаге_плана_картой_не_проверяют(self, project, monkeypatch):
-        """Человек назвал файл — вопрос «а тот ли это файл» уже решён."""
-        called = []
-        monkeypatch.setattr(codemap, "choose", lambda task, path="": called.append(1) or None)
+    def test_известный_файл_сужается_до_функции(self, project, monkeypatch):
+        """Знание файла не отвечает на вопрос, какую функцию править.
+
+        Первая версия здесь выходила сразу — «файл назван, вопрос
+        решён», — и правка функции не включалась никогда: план правки
+        всегда ставит в шаг `search` путь, а не цитату.
+        """
+        place = codemap.Definition("calc_mod.py", "add", "a, b", 1, 2, "функция")
+        asked = []
+        monkeypatch.setattr(codemap, "choose",
+                            lambda task, path="": asked.append(path) or place)
         state = started(Plan("з", [Step("search", "calc_mod.py", "")]))
         pipeline.node_step(state)
+
         assert state.extra["path"] == "calc_mod.py"
-        assert called == []
+        assert asked == ["calc_mod.py"]
+        assert state.extra["place"]["name"] == "add"
 
 
 # ====================================================================
