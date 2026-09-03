@@ -513,6 +513,33 @@ def _unreachable_lines(text: str) -> list[str]:
     return [lines[n - 1].strip() for n in sorted(numbers) if 0 < n <= len(lines)]
 
 
+def duplicate_definitions(path: str, before: str, after: str) -> list[str]:
+    """Имена, определённых наверху стало БОЛЬШЕ, чем было.
+
+    Живой прогон: в файле уже лежала `def derivative(a, b, c)`, а правка
+    дописала в конец вторую такую же, слово в слово. Файл разбирается,
+    имена определены, запускается — и всё это время в нём две одинаковые
+    функции, из которых работает вторая.
+
+    Считается КОЛИЧЕСТВО, а не наличие. Замена функции на месте — самая
+    обычная правка, и там имя есть и до, и после; беда начинается,
+    когда определений становится два.
+    """
+    if not path.endswith(".py"):
+        return []
+    was = _counted(before)
+    now = _counted(after)
+    return sorted(name for name, count in now.items() if count > max(1, was.get(name, 0)))
+
+
+def _counted(text: str) -> dict[str, int]:
+    """Сколько раз каждое имя определено на верхнем уровне."""
+    counts: dict[str, int] = {}
+    for name in top_definitions("x.py", text):
+        counts[name] = counts.get(name, 0) + 1
+    return counts
+
+
 def doubled_main(path: str, before: str, after: str) -> bool:
     """Появился ли ВТОРОЙ блок `if __name__ == "__main__"`.
 

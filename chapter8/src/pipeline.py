@@ -648,6 +648,18 @@ def _step_search(step, state: State) -> tuple[bool, str]:
         _remember_place(state, codemap.choose(state.user_input, path))
         return True, f"файл {path}"
 
+    # Цель шага — само имя функции? Тогда спрашивать модель не о чем:
+    # адрес уже назван, и карта его подтверждает. Живой прогон показал,
+    # чем оборачивается лишний вопрос: на задаче «нужно чтобы derivative
+    # вызывалась ВНУТРИ solve_quadratic» код выбрал `solve_quadratic`
+    # (самое длинное слово задачи), а модель — `derivative`, потому что
+    # это имя стоит в задаче первым. Править надо было первое.
+    named_place = codemap.find(target)
+    if named_place:
+        state.extra["path"] = named_place.path
+        _remember_place(state, named_place)
+        return True, f"функция {named_place.name} в {named_place.path}"
+
     found = search_files(target, "*.py")
     path = _first_path(found)
     if path:

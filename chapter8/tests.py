@@ -52,6 +52,7 @@ from chapter8.src.edits import (
     definitions,
     describe_forms,
     doubled_main,
+    duplicate_definitions,
     edit_schema,
     filled_bodies,
     lost_definitions,
@@ -1596,6 +1597,10 @@ class TestEditWithoutName:
         monkeypatch.setattr(planner_module, "remembered_file", lambda: "")
         assert plan_kind("исправь: оно не должно закрываться сразу") == ("fix", "run.bat")
 
+    def test_просьба_без_глагола_адресуется(self, project_pair):
+        """«Нужно чтобы X» — правка, и адрес у неё тот же, что у «поправь X»."""
+        assert plan_kind("нужно чтобы окно не закрывалось") == ("fix", "run.bat")
+
     def test_глагол_создания_по_прежнему_создаёт(self, project_pair):
         assert plan_kind("напиши приложение которое считает факториал") == ("needs_name", "")
 
@@ -2537,6 +2542,40 @@ class TestImportsOnTop:
         answer = append_to_file("app.py", "print('конец')\n")
         assert "в конец файла" in answer
         assert (workspace / "app.py").read_text(encoding="utf-8").rstrip().endswith("print('конец')")
+
+
+class TestDuplicateDefinitions:
+    """Определение, дописанное рядом с таким же, — не правка, а копия.
+
+    Живой прогон: в файле уже лежала `def derivative(a, b, c)`, а правка
+    дописала в конец вторую такую же, слово в слово. Файл разбирается,
+    имена определены, запускается — и всё это время в нём две одинаковые
+    функции, из которых работает вторая.
+    """
+
+    ONE = "def f(a):" + chr(10) + "    return a" + chr(10)
+
+    def test_второе_определение_видно(self):
+        assert duplicate_definitions("a.py", self.ONE, self.ONE + chr(10) + self.ONE) == ["f"]
+
+    def test_замена_на_месте_это_не_повтор(self):
+        """Имя есть и до, и после — беда начинается, когда их два."""
+        fixed = "def f(a):" + chr(10) + "    return a * 2" + chr(10)
+        assert duplicate_definitions("a.py", self.ONE, fixed) == []
+
+    def test_новая_функция_рядом_законна(self):
+        added = self.ONE + chr(10) + "def g():" + chr(10) + "    return 1" + chr(10)
+        assert duplicate_definitions("a.py", self.ONE, added) == []
+
+    def test_чужие_два_определения_не_наша_вина(self):
+        both = self.ONE + self.ONE
+        assert duplicate_definitions("a.py", both, both + "x = 1" + chr(10)) == []
+
+    def test_правка_с_повтором_отменяется(self, workspace):
+        (workspace / "app.py").write_text(self.ONE, encoding="utf-8")
+        answer = append_to_file("app.py", self.ONE)
+        assert "оказались в файле дважды" in answer
+        assert (workspace / "app.py").read_text(encoding="utf-8") == self.ONE
 
 
 class TestUndefinedOnWrite:
@@ -4552,6 +4591,24 @@ class TestEditFunction:
 class TestSearchByMap:
     """Шаг поиска: путь, потом текст, потом карта."""
 
+    def test_названная_функция_и_есть_место(self, project, monkeypatch):
+        """Адрес уже назван — лишний вопрос модели только вредит.
+
+        Живой прогон: на задаче «нужно чтобы derivative вызывалась
+        ВНУТРИ solve_quadratic» код выбрал `solve_quadratic` — самое
+        длинное слово задачи, — а модель `derivative`, потому что это
+        имя стоит в задаче первым. Править надо было первое.
+        """
+        called = []
+        monkeypatch.setattr(codemap, "choose",
+                            lambda task, path="": called.append(1) or None)
+        state = started(Plan("з", [Step("search", "add", "")]))
+        pipeline.node_step(state)
+
+        assert state.extra["place"]["name"] == "add"
+        assert state.extra["path"] == "calc_mod.py"
+        assert called == [], "имя названо — спрашивать не о чем"
+
     def test_карта_подключается_когда_текста_не_нашлось(self, project, monkeypatch):
         place = codemap.Definition("calc_mod.py", "add", "a, b", 1, 2, "функция")
         monkeypatch.setattr(codemap, "choose", lambda task, path="": place)
@@ -4755,6 +4812,20 @@ class TestAgentEntry:
     ])
     def test_вопрос_в_начале_остаётся_вопросом(self, question):
         assert not agent8.looks_like_task(question)
+
+    @pytest.mark.parametrize("task", [
+        "нужно чтобы derivative вызывалась внутри solve_quadratic",
+        "надо чтобы окно не закрывалось",
+        "нужно, чтобы приложение печатало производную",
+    ])
+    def test_просьба_без_глагола_это_задача(self, task):
+        """«Нужно чтобы X» — задача на правку, и человек так пишет постоянно.
+
+        Живой прогон отправил такую реплику отвечать текстом, и
+        исполнитель честно ответил пересказом того, что СЛЕДОВАЛО БЫ
+        сделать, ничего не сделав.
+        """
+        assert agent8.looks_like_task(task)
 
     def test_опечатка_человека_ловится(self):
         """«испарвь» стоит в маркерах намеренно: цена промаха несимметрична."""

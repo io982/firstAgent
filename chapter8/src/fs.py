@@ -36,6 +36,7 @@ from chapter8.src.edits import (
     apply_full,
     apply_lines,
     doubled_main,
+    duplicate_definitions,
     lost_definitions,
     stray_definitions,
     syntax_ok,
@@ -165,6 +166,14 @@ def _commit(path: Path, before: str, after: str, action: str, replace: bool = Fa
             f"Правка отменена: имена {', '.join(now_undefined)} нигде не определены — "
             "программа упадёт NameError на первой же строке, где они встретятся. "
             "Пользуйтесь тем, что функции доступно: её аргументами и именами файла. "
+            "Файл на диске не тронут."
+        )
+
+    twice = duplicate_definitions(path.name, before, after)
+    if twice and not replace:
+        return (
+            f"Правка отменена: определения {', '.join(twice)} после неё оказались в файле "
+            "дважды. Менять надо СУЩЕСТВУЮЩЕЕ определение, а не дописывать рядом второе. "
             "Файл на диске не тронут."
         )
 
