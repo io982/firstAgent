@@ -1968,6 +1968,28 @@ class TestSkeleton:
         spec = {"functions": [{"name": "f", "args": "", "purpose": 'делает """нечто"""'}]}
         assert syntax_ok("a.py", pipeline.render_skeleton(spec, "з")) == (True, "")
 
+    def test_негодное_имя_модуля_пропускается(self):
+        """`import assert` не разбирается, а именно это модель и предложила.
+
+        Замер режимов письма упирался в это на задаче про самое длинное
+        слово: одно слово в списке `imports` — и весь прогон кончался
+        ничем. Модель отвечает про смысл, синтаксис — наша забота.
+        """
+        spec = {"imports": ["assert", "os.path", "два слова", "", "json"],
+                "functions": [{"name": "f", "args": "", "purpose": "x"}]}
+        text = pipeline.render_skeleton(spec, "з")
+        assert syntax_ok("a.py", text) == (True, "")
+        assert "import os.path" in text
+        assert "import json" in text
+        assert "assert" not in text
+
+    @pytest.mark.parametrize("name,ok", [
+        ("os", True), ("os.path", True), ("assert", False), ("import", False),
+        ("два слова", False), ("", False), ("3json", False),
+    ])
+    def test_годность_имени_модуля(self, name, ok):
+        assert pipeline.importable(name) is ok
+
     def test_схема_состава_не_просит_кода(self):
         props = pipeline.file_plan_schema()["properties"]
         assert set(props["functions"]["items"]["required"]) == {"name", "args", "purpose"}
@@ -2032,6 +2054,31 @@ class TestWriteModes:
         pipeline.node_step(state)
         assert "пропали функции: mul" in state.extra["log"][0]
         assert not (workspace / "app.py").exists()
+
+    def test_оборванный_ответ_называют_оборванным(self, workspace, monkeypatch):
+        """Разбор проверяется РАНЬШЕ состава, и это не мелочь отчёта.
+
+        Файл, который не разбирается, не имеет определений вовсе —
+        и сверка состава честно объявляет пропавшими все до одной
+        функции. Замер режимов письма из-за этого показывал «пропали
+        функции» там, где модель ушла в разгон: писала assert за
+        assert, упиралась в предел длины и обрывалась на полуслове.
+        Беда была в длине, а искали её в составе.
+        """
+        spec = json.dumps({"functions": [{"name": "add", "args": "a, b", "purpose": "сумма"}]})
+        torn = file_answer("def add(a, b):\n    assert add(1, 1) == 2, 'сум")
+        monkeypatch.setattr(pipeline, "request_model", fake_model([spec, torn, spec, torn]))
+        monkeypatch.setattr(pipeline, "WRITE_MODE", "skeleton")
+
+        state = started(Plan("з", [Step("create", "app.py", "")]))
+        pipeline.node_step(state)
+        assert "не разбирается" in state.extra["log"][0]
+        assert "пропали функции" not in state.extra["log"][0]
+
+    def test_разгон_дописывания_запрещён_правилами(self):
+        """Живой замер: тестовая функция писала assert, пока хватало длины."""
+        assert "две-три" in pipeline.FILL_RULES
+        assert "не удлиняй" in pipeline.FILL_RULES
 
     def test_не_python_пишется_прямо_даже_в_режиме_скелета(self, workspace, monkeypatch):
         """Скелет из функций для батника бессмыслен."""
@@ -3559,6 +3606,17 @@ def make_task_project(root, source, test_source, long_file=False):
     return root
 
 
+def rounds(times, tasks):
+    """Задачи, повторённые нужное число раз, парой «номер прогона, задача».
+
+    Один прогон замера — ещё не замер: разброс между прогонами в этой
+    главе не раз оказывался больше измеряемой разницы. Отдельная функция
+    нужна, чтобы повтор не добавлял в замеры лишний уровень отступа
+    и выглядел во всех одинаково.
+    """
+    return [(attempt, task) for attempt in range(times) for task in tasks]
+
+
 def make_empty_project(root):
     """Пустой каталог под задачу с нуля."""
     root.mkdir(parents=True, exist_ok=True)
@@ -4049,7 +4107,23 @@ class TestWriteMode:
     Время здесь не второстепенно: режим скелета делает ДВА запроса
     вместо одного, и если он не выигрывает в качестве, то проигрывает
     вдвойне.
+
+    Отдельно считается, СКОЛЬКО прогонов кончились ненаписанным файлом.
+    Без этой колонки замер отвечал не на свой вопрос: он складывал
+    «код хуже» с «файл не дошёл до диска», а это разные ответы.
+    Различив их, замер сразу показал две наши поломки — `import assert`
+    в собранном скелете и разгон дописывания до предела длины, — и обе
+    были починены. Вывод после починки не перевернулся, но теперь он
+    про приём, а не про наши ошибки.
+
+    Прогонов ДВА, по той же причине, что и в замере моделей: разброс
+    между прогонами оказался больше измеряемой разницы. Одна и та же
+    модель в соседних прогонах дала 1/5 и 0/5, её ровесница — 1/5 и 3/5;
+    поодиночке эти цифры не значат ничего, и на паре из них я успел
+    сделать вывод, который следующий прогон отменил.
     """
+
+    ROUNDS = 2
 
     def test_два_режима_на_обеих_моделях(self, tmp_path, warm_model):
         installed = set(base.list_installed_models())
@@ -4062,14 +4136,13 @@ class TestWriteMode:
             for mode in ("direct", "skeleton"):
                 green = unwritten = 0
                 spent = 0.0
-                with using_model(model):
-                    for name, task in SCRATCH_TASKS:
-                        make_empty_project(tmp_path / f"{folder_name(model)}-{mode}-{name}")
-                        with pytest.MonkeyPatch.context() as patch:
-                            patch.setattr(pipeline, "WRITE_MODE", mode)
-                            started_at = time.monotonic()
-                            state = run_pipeline(task)
-                            spent += time.monotonic() - started_at
+                with using_model(model), pytest.MonkeyPatch.context() as patch:
+                    patch.setattr(pipeline, "WRITE_MODE", mode)
+                    for attempt, (name, task) in rounds(self.ROUNDS, SCRATCH_TASKS):
+                        make_empty_project(tmp_path / f"{folder_name(model)}-{mode}{attempt}-{name}")
+                        started_at = time.monotonic()
+                        state = run_pipeline(task)
+                        spent += time.monotonic() - started_at
                         green += bool(state.extra.get("tests_green"))
                         # Провал провалу рознь, и различать их обязательно.
                         # «Файл не написался» — беда механическая: ответ
@@ -4082,11 +4155,12 @@ class TestWriteMode:
                 report.append((model, mode, green, unwritten, spent))
 
         print("\n\nЗАМЕР 6: как писать файл — целиком или по скелету")
-        print(f"Задач с нуля: {len(SCRATCH_TASKS)}")
+        total = len(SCRATCH_TASKS) * self.ROUNDS
+        print(f"Задач с нуля: {len(SCRATCH_TASKS)}, прогонов каждой: {self.ROUNDS}")
         print(f"{'модель':<26}{'режим':<12}{'зелёные':>10}{'файл не написан':>18}{'секунд':>10}")
         for model, mode, green, unwritten, spent in report:
-            print(f"{model:<26}{mode:<12}{green:>7}/{len(SCRATCH_TASKS):<2}"
-                  f"{unwritten:>15}/{len(SCRATCH_TASKS):<2}{spent:>10.0f}")
+            print(f"{model:<26}{mode:<12}{green:>7}/{total:<3}"
+                  f"{unwritten:>15}/{total:<3}{spent:>10.0f}")
 
         assert report, "замер не собрал ни одной строки"
 
