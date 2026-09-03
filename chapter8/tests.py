@@ -17,6 +17,7 @@
 """
 
 import json
+import math
 import os
 import shutil
 import subprocess
@@ -34,7 +35,7 @@ from chapter7.src.agents import SPECIALISTS, Team
 from chapter7.src.graph import State
 from chapter7.src.models import using_model
 from chapter8.agent import handle
-from chapter8.src import codemap, env, guard, pipeline, pipeline_lg, review
+from chapter8.src import codemap, env, formula, guard, pipeline, pipeline_lg, review
 from chapter8.src import planner as planner_module
 from chapter8.src.edits import (
     ANCHOR,
@@ -113,6 +114,7 @@ from chapter8.src.vcs import GIT_TOOLS, current_branch, git_commit, git_diff, gi
 REAL_CHOOSE = codemap.choose
 REAL_REVIEW = review.review
 REAL_FIND = codemap.find
+REAL_HINTS = formula.hints
 
 GIT = shutil.which("git")
 needs_git = pytest.mark.skipif(GIT is None, reason="git не установлен")
@@ -156,6 +158,8 @@ def workspace(tmp_path, monkeypatch):
     # запущенной Ollama. Тесты, которым выбор нужен, подменяют его сами.
     monkeypatch.setattr(codemap, "choose", lambda task, path="": None)
     monkeypatch.setattr(review, "review", lambda task, path, model_call=None: (True, []))
+    monkeypatch.setattr(formula, "hints", lambda task, source="", model_call=None: "")
+    monkeypatch.setattr(formula, "hints", lambda task, model_call=None: "")
     codemap.forget_cache()
     guard.set_policy(root=tmp_path, mode=guard.AUTO, dry_run=False)
     return tmp_path
@@ -4127,6 +4131,114 @@ class TestChoosePlace:
         assert called == [], "выбирать не из чего — спрашивать не о чем"
 
 
+class TestFormulaCalculator:
+    """Калькулятор формул: не посчитать вместо модели, а проверить её ответ.
+
+    Живой ответ `qwen2.5-coder:3b` на площадь круга — `pi * r^2`.
+    На бумаге верно, как код сломано: в Python `^` это исключающее ИЛИ.
+    Формулу, которая не вычисляется, подкладывать нельзя — это
+    не помощь, а новая беда.
+    """
+
+    @pytest.mark.parametrize("expression", [
+        "2*a*x + b", "b**2 - 4*a*c", "pi*r**2", "math.sqrt(d)/(2*a)", "n*(n+1)/2",
+    ])
+    def test_годная_формула(self, expression):
+        assert formula.usable(expression)[0]
+
+    def test_крышка_это_не_степень(self):
+        ok, why = formula.usable("pi * r^2")
+        assert not ok
+        assert "исключающее ИЛИ" in why
+
+    @pytest.mark.parametrize("bad", ["", "x = 2*a", "return 2*a", "def f(): pass", "2*a +"])
+    def test_негодная_формула(self, bad):
+        assert not formula.usable(bad)[0]
+
+    def test_незнакомое_имя_не_пропускают(self):
+        """Формула должна вычисляться, а не звать что попало."""
+        ok, why = formula.usable("моялишняяфункция(a)")
+        assert not ok
+        assert "незнакомые имена" in why
+
+    def test_не_число_не_формула(self):
+        """Живой ответ: `lambda x: (x**2).diff(x)` — синтаксис sympy."""
+        assert not formula.usable("lambda x: x + 1")[0]
+
+
+class TestFormulaAsked:
+    """Формула спрашивается отдельным коротким вопросом — и без кода.
+
+    Это выяснилось живой пробой, и результат обратный ожиданию. Чистый
+    вопрос «производная от a*x**2 + b*x + c по x» даёт `2*a*x + b`.
+    Тот же вопрос с приложенным исходником функции даёт `2*a`: код
+    в запросе восстанавливает то самое длинное задание, из-под которого
+    знание и не всплывает.
+    """
+
+    def answer(self, value):
+        return lambda messages, response_format=None: json.dumps({"формула": value})
+
+    def test_вычисления_в_задаче_видны(self):
+        assert formula.needs_formulas("добавь вывод производной") == ["производная"]
+        assert formula.needs_formulas("посчитай площадь и периметр") == ["площадь", "периметр"]
+
+    def test_задача_без_вычислений_вопросов_не_рождает(self):
+        assert formula.needs_formulas("напиши приложение hello world") == []
+
+    def test_больше_двух_формул_не_спрашивают(self):
+        many = "посчитай площадь, периметр, объём и медиану"
+        assert len(formula.needs_formulas(many)) == formula.MAX_FORMULAS
+
+    def test_вопрос_строится_вокруг_выражения(self):
+        assert formula.question_for("производная", "a*x**2 + b*x + c", "з") == \
+            "производная от a*x**2 + b*x + c по x"
+
+    def test_без_выражения_спрашивают_по_задаче(self):
+        assert "добавь вывод" in formula.question_for("производная", "", "добавь вывод")
+
+    def test_негодный_ответ_в_справку_не_идёт(self):
+        """Неверная подсказка хуже отсутствующей: модель примет её за факт."""
+        assert formula.ask_formula("производная от x**2 по x", self.answer("pi * r^2")) == ""
+
+    def test_годный_ответ_возвращается(self):
+        assert formula.ask_formula("производная от x**2 по x", self.answer("2*x")) == "2*x"
+
+    def test_молчание_модели_прогон_не_роняет(self):
+        def boom(*a, **k):
+            raise ConnectionError("Ollama молчит")
+
+        assert formula.ask_formula("производная", boom) == ""
+
+    def test_справка_собирается_из_проверенного(self, monkeypatch):
+        monkeypatch.setattr(formula, "FORMULAS", "on")
+        text = formula.hints("добавь вывод производной", "def f(a, x): return a*x**2",
+                             self.answer("2*a*x"))
+        assert "производная: 2*a*x" in text
+        assert "проверены вычислением" in text
+
+    def test_без_вычислений_справки_нет(self, monkeypatch):
+        monkeypatch.setattr(formula, "FORMULAS", "on")
+        assert formula.hints("напиши hello world", "", self.answer("2*x")) == ""
+
+    def test_по_умолчанию_справка_выключена(self):
+        """Решение замера 10: она не помогла ни разу и дважды помешала."""
+        assert formula.FORMULAS == "off"
+
+    def test_переключатель_выключает_вопрос(self, monkeypatch):
+        monkeypatch.setattr(formula, "FORMULAS", "off")
+        called = []
+        assert formula.hints("вывод производной", "", lambda *a, **k: called.append(1)) == ""
+        assert called == []
+
+    def test_примеров_функций_в_правилах_нет(self):
+        """Пример в промпте становится ответом: `sqrt(d)` в правилах —
+        и модель отвечает `math.factorial(x)` на вопрос про производную.
+        """
+        for name in ("sqrt", "sin(", "log(", "factorial"):
+            assert name not in formula.FORMULA_RULES
+
+
 class TestReview:
     """Разбор написанного: сделано ли то, о чём просили.
 
@@ -5683,6 +5795,232 @@ class TestReviewQuality:
         print(f"{'модель':<26}{'поймал беду':>14}{'промолчал зря нет':>20}{'секунд':>10}")
         for model, caught, quiet, spent in report:
             print(f"{model:<26}{caught:>11}/{bad_total:<2}{quiet:>17}/{good_total:<2}{spent:>10.1f}")
+
+        assert report, "замер не собрал ни одной строки"
+
+
+QUADRATIC_SOURCE = (
+    "def solve_quadratic(a, b, c):\n"
+    "    d = b**2 - 4*a*c\n"
+    "    if d > 0:\n"
+    "        return ((-b + math.sqrt(d))/(2*a), (-b - math.sqrt(d))/(2*a))\n"
+    "    return None\n"
+)
+
+# Задачи для замера формул: что спрашиваем, что считаем верным ответом
+# и какой код показываем. Верный ответ задан ФУНКЦИЕЙ, а не строкой:
+# `2*a*x + b` и `b + 2*a*x` — одна формула, а строки разные, и сравнивать
+# их текстом значит мерить не то.
+FORMULA_CASES = [
+    (
+        "производная",
+        "a*x**2 + b*x + c",
+        QUADRATIC_SOURCE,
+        lambda v: 2 * v["a"] * v["x"] + v["b"],
+    ),
+    (
+        "дискриминант",
+        "a*x**2 + b*x + c",
+        QUADRATIC_SOURCE,
+        lambda v: v["b"] ** 2 - 4 * v["a"] * v["c"],
+    ),
+    (
+        "площадь",
+        "круг радиуса r",
+        "def circle(r):\n    return r\n",
+        lambda v: math.pi * v["r"] ** 2,
+    ),
+]
+
+# Пробные значения, на которых сверяется ответ модели с верным.
+FORMULA_PROBES = ({"a": 2.0, "b": 3.0, "c": 4.0, "x": 5.0, "r": 3.0},
+                  {"a": 1.5, "b": -2.0, "c": 0.5, "x": -1.0, "r": 7.0})
+
+
+def formula_matches(expression: str, truth) -> bool:
+    """Считает ли формула модели то же, что верная, на пробных числах.
+
+    Сравнение ЧИСЛАМИ, а не текстом: `2*a*x + b` и `b + 2*a*x` — одна
+    формула. Текстовое сравнение мерило бы совпадение записи, а нужно
+    совпадение смысла.
+    """
+    ok, _ = formula.usable(expression)
+    if not ok:
+        return False
+    for probe in FORMULA_PROBES:
+        space = dict(probe)
+        space.update({name: getattr(math, name) for name in formula.ALLOWED_NAMES
+                      if hasattr(math, name)})
+        space["math"] = math
+        try:
+            got = eval(expression, {"__builtins__": {}}, space)  # noqa: S307
+        except Exception:  # noqa: BLE001
+            return False
+        if not isinstance(got, (int, float)) or abs(got - truth(probe)) > 1e-6:
+            return False
+    return True
+
+
+def ask_shape(shape: str, term: str, subject: str, source: str) -> str:
+    """Один вопрос о формуле в одной из четырёх форм."""
+    task = f"добавь в приложение вывод: {term}"
+    if shape == "выражение в вопросе":
+        return formula.ask_formula(f"{term} от {subject}", task)
+    if shape == "слово и код":
+        return formula.ask_formula(term, task, source)
+    if shape == "одно слово":
+        return formula.ask_formula(term, task)
+    if shape == "сначала выражение":
+        # Два коротких вопроса вместо одного: сперва «что считает этот
+        # код», потом «формула от вот этого». Обе половины короткие,
+        # и обе — тот вид работы, на котором 3B держится.
+        what = formula.ask_expression(source)
+        return formula.ask_formula(f"{term} от {what}", task) if what else ""
+    raise AssertionError(shape)
+
+
+FORMULA_SHAPES = ("выражение в вопросе", "слово и код", "одно слово", "сначала выражение")
+
+
+@pytest.mark.slow
+class TestFormulaShape:
+    """Замер 10: как спросить у модели формулу, чтобы она ответила верно.
+
+    Замер появился из моей же ошибки, и она поучительнее результата.
+    Модель на 3B, которую просят «добавь вывод производной», пишет
+    в коде `2*a*b - 4*a*c` — дискриминант с перепутанными знаками.
+    Спрошенная коротко, «производная от a*x**2 + b*x + c по x», та же
+    модель отвечает `2*a*x + b`, и шесть раз из шести. Вывод казался
+    очевидным: спрашивать надо отдельно.
+
+    Он был неверен. В том вопросе выражение `a*x**2 + b*x + c` написал
+    Я — а конвейеру взять его негде, у него есть только код. Замер
+    и мерит эту разницу: четыре формы одного вопроса, от «выражение
+    уже дано» до «одно слово».
+
+    Верность считается ЧИСЛАМИ: формула модели и верная формула
+    сравниваются на пробных значениях. `2*a*x + b` и `b + 2*a*x` —
+    одна формула, и текстовое сравнение мерило бы запись, а не смысл.
+    """
+
+    ROUNDS = 2
+
+    def test_четыре_формы_вопроса(self, tmp_path, warm_model):
+        installed = set(base.list_installed_models())
+        models = [m for m in CODER_CANDIDATES if m in installed]
+        if not models:
+            pytest.skip(f"ни одна из моделей {CODER_CANDIDATES} не установлена")
+
+        guard.set_policy(root=tmp_path, mode=guard.AUTO, dry_run=False)
+        report = []
+        for model in models:
+            with using_model(model):
+                for shape in FORMULA_SHAPES:
+                    right = usable_count = 0
+                    spent = 0.0
+                    for _, (term, subject, source, truth) in rounds(self.ROUNDS, FORMULA_CASES):
+                        started_at = time.monotonic()
+                        answer = ask_shape(shape, term, subject, source)
+                        spent += time.monotonic() - started_at
+                        usable_count += bool(answer)
+                        right += formula_matches(answer, truth)
+                    report.append((model, shape, right, usable_count, spent))
+
+        total = len(FORMULA_CASES) * self.ROUNDS
+        print("\n\nЗАМЕР 10: как спросить формулу")
+        print(f"Формул: {len(FORMULA_CASES)}, прогонов каждой: {self.ROUNDS}")
+        print(f"{'модель':<26}{'форма вопроса':<22}{'верно':>9}{'вычислимо':>12}{'секунд':>9}")
+        for model, shape, right, usable_count, spent in report:
+            print(f"{model:<26}{shape:<22}{right:>6}/{total:<2}{usable_count:>9}/{total:<2}{spent:>9.1f}")
+
+        assert report, "замер не собрал ни одной строки"
+
+
+FORMULA_MODULE = (
+    "import math\n"
+    "\n\n"
+    "def solve_quadratic(a, b, c):\n"
+    "    d = b**2 - 4*a*c\n"
+    "    if d > 0:\n"
+    "        return ((-b + math.sqrt(d))/(2*a), (-b - math.sqrt(d))/(2*a))\n"
+    "    return None\n"
+    "\n\n"
+    "if __name__ == '__main__':\n"
+    "    a = float(input('a: '))\n"
+    "    b = float(input('b: '))\n"
+    "    c = float(input('c: '))\n"
+    "    x = 1.0\n"
+    "    print('Корни:', solve_quadratic(a, b, c))\n"
+)
+
+# Задачи, где ответ проверяется формулой, а не мнением. Третий элемент —
+# как ДОЛЖНА выглядеть формула в написанном коде, с точностью до пробелов.
+FORMULA_TASKS = [
+    ("производная", "добавь в приложение вывод производной", "2*a*x+b"),
+    ("дискриминант", "добавь в приложение вывод дискриминанта", "b**2-4*a*c"),
+]
+
+
+def has_formula(text: str, wanted: str) -> bool:
+    """Есть ли в коде нужная формула. Пробелы не считаются разницей."""
+    return wanted in "".join(text.split())
+
+
+@pytest.mark.slow
+class TestFormulaHints:
+    """Замер 10: помогает ли спросить формулу отдельным вопросом.
+
+    Вопрос замера родился из шести живых прогонов подряд, в которых
+    модель писала в коде `2*a*b - 4*a*c` — дискриминант с перепутанными
+    знаками, выданный за производную. Выглядело это потолком модели,
+    и я так и сказал. Оказалось иначе: та же модель, спрошенная коротко
+    и отдельно, отвечает `2*a*x + b`. Знание есть, оно не всплывает
+    под длинной задачей на написание кода.
+
+    Мерятся ДВЕ вещи, и вторая не менее важна первой:
+
+      * доехала ли ВЕРНАЯ формула до кода;
+      * не приехала ли НЕВЕРНАЯ подсказка. Формула, не прошедшая
+        проверку вычислением, в справку не попадает — и это тот случай,
+        когда молчание лучше ответа: отсутствие подсказки модель
+        переживёт, а неверную примет за факт.
+    """
+
+    ROUNDS = 2
+
+    def test_справка_о_формулах(self, tmp_path, warm_model, monkeypatch):
+        installed = set(base.list_installed_models())
+        models = [m for m in CODER_CANDIDATES if m in installed]
+        if not models:
+            pytest.skip(f"ни одна из моделей {CODER_CANDIDATES} не установлена")
+
+        monkeypatch.setenv("AGENT_CODEMAP_FILE", str(tmp_path / "codemap.json"))
+        monkeypatch.setattr(formula, "hints", REAL_HINTS)
+
+        report = []
+        for model in models:
+            for switch in ("off", "on"):
+                right = hinted = 0
+                spent = 0.0
+                with using_model(model), pytest.MonkeyPatch.context() as patch:
+                    patch.setattr(formula, "FORMULAS", switch)
+                    for attempt, (name, task, wanted) in rounds(self.ROUNDS, FORMULA_TASKS):
+                        root = make_empty_project(tmp_path / f"{folder_name(model)}-{switch}{attempt}-{name}")
+                        (root / "quadratic.py").write_text(FORMULA_MODULE, encoding="utf-8")
+                        codemap.forget_cache()
+                        started_at = time.monotonic()
+                        state = run_pipeline(task)
+                        spent += time.monotonic() - started_at
+                        right += has_formula((root / "quadratic.py").read_text(encoding="utf-8"), wanted)
+                        hinted += bool(state.extra.get("formulas"))
+                report.append((model, switch, right, hinted, spent))
+
+        total = len(FORMULA_TASKS) * self.ROUNDS
+        print("\n\nЗАМЕР 10: формула спрошена отдельно")
+        print(f"Задач: {len(FORMULA_TASKS)}, прогонов каждой: {self.ROUNDS}")
+        print(f"{'модель':<26}{'справка':<9}{'формула верна':>15}{'справка была':>15}{'секунд':>9}")
+        for model, switch, right, hinted, spent in report:
+            print(f"{model:<26}{switch:<9}{right:>12}/{total:<2}{hinted:>12}/{total:<2}{spent:>9.0f}")
 
         assert report, "замер не собрал ни одной строки"
 

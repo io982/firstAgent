@@ -67,7 +67,7 @@ from chapter1.agent import request_model
 from chapter5.agent import matches
 from chapter7.src.graph import END, Graph, State
 from chapter7.src.models import using_model
-from chapter8.src import codemap, env, guard, review
+from chapter8.src import codemap, env, formula, guard, review
 from chapter8.src.edits import (
     ANCHOR,
     ANCHOR_MISSED,
@@ -794,6 +794,14 @@ def _task_block(step, state: State, path: str, problem: str) -> str:
     # тратить контекст на повтор.
     if hint and hint != state.user_input.strip():
         text += f"Подсказка из плана (не ограничение, а напоминание): {hint}\n"
+    # Формулы спрашиваются отдельным коротким вопросом и приходят сюда
+    # уже проверенными вычислением. Причина в наблюдении: модель,
+    # которую просят «добавь вывод производной», пишет в коде
+    # `2*a*b - 4*a*c`, а спрошенная коротко отвечает `2*a*x + b` —
+    # и так шесть раз из шести на двух моделях. Знание есть, оно
+    # не всплывает под длинной задачей. Тот же урок, что у формы правки,
+    # имени файла и выбора места: короткий вопрос получает хороший ответ.
+    text += _formula_hints(state)
     text += f"\nЗАДАЧА ЦЕЛИКОМ — делай ровно её, ничего не упуская:\n{state.user_input}\n"
     if problem:
         text += f"\nПрошлая попытка не годится: {problem}\n"
@@ -931,6 +939,22 @@ def _patience(seconds: float):
         yield
     finally:
         base.REQUEST_TIMEOUT = previous
+
+
+def _formula_hints(state: State) -> str:
+    """Справка с формулами — один раз на прогон, а не на каждый запрос.
+
+    Кэш в состоянии обязателен: `_task_block` зовут и создание файла,
+    и правка, и каждая попытка починки, а вопрос к модели стоит секунд.
+    Задача за прогон не меняется, значит и формулы те же.
+    """
+    if "formulas" not in state.extra:
+        # Предметом вопроса служит код, который правим: без него
+        # «производная» — вопрос без ответа.
+        place = state.extra.get("place") or {}
+        source = _function_source(place["path"], place) if place.get("path") else ""
+        state.extra["formulas"] = formula.hints(state.user_input, source)
+    return state.extra["formulas"]
 
 
 def _neighbours(state: State) -> str:
@@ -1733,6 +1757,11 @@ def _ask_for_edit(state: State, path: str, detail: str, failure: str = "",
     user = f"Задача: {state.user_input}\n"
     if detail:
         user += f"Шаг плана: {detail}\n"
+    # Справка о формулах нужна и здесь, а не только на пути правки
+    # одной функции. Первая версия клала её только в `_task_block`,
+    # который обычные формы правки не зовут вовсе, — и вся работа
+    # со спрошенной формулой до модели не доезжала.
+    user += _formula_hints(state)
     # `retrieved` уже приходит с заголовками файлов, когда его собрал
     # `_read_pair`. Заворачивать его во второй заголовок значит написать
     # «Файл a.py: Файл a.py: ...» и запутать модель ровно там, где ей
