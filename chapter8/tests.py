@@ -1864,7 +1864,7 @@ def file_answer(content):
 
 def fake_run(green, output=""):
     """Подделка запуска процесса: удачный или нет."""
-    def run(command, timeout=None):
+    def run(command, timeout=None, feed=""):
         return Run(command, 0 if green else 1, output or ("2 passed" if green else "E  assert 4 == 5"), "", 0.2)
     return run
 
@@ -2389,7 +2389,7 @@ class TestScaffoldAsked:
         )
         seen = []
 
-        def run(command, timeout=None):
+        def run(command, timeout=None, feed=""):
             seen.append(command)
             return Run(command, 0, "", "", 0.1)
 
@@ -2627,12 +2627,18 @@ class TestInputAtImport:
         assert not pipeline._waits_for_input("app.py")
         assert not pipeline.asks_input_on_import("app.py")
 
-    def test_такой_файл_проверяется_разбором(self, workspace, monkeypatch):
+    def test_ввод_подставляется_и_программа_запускается(self, workspace, monkeypatch):
+        """Запуск с подставленным вводом заменил и импорт, и разбор.
+
+        Оба молчали про то, ради чего программу пишут: файл разбирается,
+        импортируется — а запуск падает NameError на первой же строке.
+        Ввод подставляется строками, и программа выполняется всерьёз.
+        """
         (workspace / "app.py").write_text(self.BARE, encoding="utf-8")
         seen = []
 
-        def run(command, timeout=None):
-            seen.append(command)
+        def run(command, timeout=None, feed=""):
+            seen.append((command, feed))
             return Run(str(command), 0, "", "", 0.1)
 
         monkeypatch.setattr(pipeline, "execute", run)
@@ -2640,23 +2646,24 @@ class TestInputAtImport:
         pipeline.node_verify(state)
 
         assert state.extra["tests_green"]
-        assert "разбор" in state.extra["verified_by"]
-        assert "py_compile" in " ".join(seen[0])
+        assert "с подставленным вводом" in state.extra["verified_by"]
+        assert seen[0][1] == pipeline.SCRIPTED_INPUT
 
-    def test_под_main_по_прежнему_импортом(self, workspace, monkeypatch):
+    def test_ввод_под_main_тоже_подставляется(self, workspace, monkeypatch):
+        """Разница «на верхнем уровне или под __main__» для запуска не важна."""
         (workspace / "app.py").write_text(self.GUARDED, encoding="utf-8")
         seen = []
 
-        def run(command, timeout=None):
-            seen.append(command)
+        def run(command, timeout=None, feed=""):
+            seen.append((command, feed))
             return Run(str(command), 0, "", "", 0.1)
 
         monkeypatch.setattr(pipeline, "execute", run)
         state = started(Plan("з", []), touched=["app.py"])
         pipeline.node_verify(state)
 
-        assert "импорт" in state.extra["verified_by"]
-        assert "import app" in " ".join(seen[0])
+        assert "с подставленным вводом" in state.extra["verified_by"]
+        assert seen[0][1] == pipeline.SCRIPTED_INPUT
 
 
 class TestPlannedModules:
@@ -2738,8 +2745,10 @@ class TestUndefinedNames:
         (workspace / "app.py").write_text(self.BROKEN, encoding="utf-8")
         state = started(Plan("з", []), touched=["app.py"])
         pipeline.node_verify(state)
-        assert "запускать её нечем" in state.extra["verified_by"]
+        # Программа запускается по-настоящему и падает по-настоящему:
+        # NameError вместо нашей формулировки про неопределённые имена.
         assert state.extra["tests_green"] is False
+        assert "derivative" in state.extra["failure"]
 
     def test_у_запущенной_программы_линтер_не_спрашивается(self, workspace, monkeypatch):
         """Запуск — проверка сильнее линтера, и второй раз спрашивать нечего."""
@@ -2765,7 +2774,7 @@ class TestVerifyModes:
         (workspace / "app.py").write_text("print(1)\n", encoding="utf-8")
         seen = []
         monkeypatch.setattr(pipeline, "execute",
-                            lambda c, timeout=None: seen.append(c) or Run(c, 0, "1", "", 0.1))
+                            lambda c, timeout=None, feed="": seen.append(c) or Run(c, 0, "1", "", 0.1))
         state = started(Plan("з", []), touched=["app.py"])
         pipeline.node_verify(state)
         assert state.extra["verified_by"] == "запуск app.py"
@@ -2803,7 +2812,7 @@ class TestVerifyModes:
         (workspace / "helper.py").write_text("print(2)\n", encoding="utf-8")
         seen = []
         monkeypatch.setattr(pipeline, "execute",
-                            lambda c, timeout=None: seen.append(c) or Run(c, 0, "", "", 0.1))
+                            lambda c, timeout=None, feed="": seen.append(c) or Run(c, 0, "", "", 0.1))
         state = started(Plan("з", []), touched=["app.py", "helper.py"])
         pipeline.node_verify(state)
         assert "helper.py" in seen[0], "запускается последний написанный"
@@ -2835,27 +2844,46 @@ class TestInteractiveProgram:
         (workspace / "a.py").write_text("def f(:\n", encoding="utf-8")
         assert not pipeline._waits_for_input("a.py")
 
-    def test_интерактивная_программа_проверяется_импортом(self, workspace, monkeypatch):
+    def test_интерактивная_программа_запускается_с_вводом(self, workspace, monkeypatch):
+        """Раньше её импортировали — теперь запускают, подставив строки.
+
+        Импорт отвечал на вопрос «файл разбирается и подключается»,
+        а человеку нужен ответ на другой: «работает ли программа».
+        """
         (workspace / "app.py").write_text(
-            "def main():\n    print(input())\n\nif __name__ == '__main__':\n    main()\n",
+            "def main():" + chr(10) + "    print(input())" + chr(10) * 2 +
+            "if __name__ == '__main__':" + chr(10) + "    main()" + chr(10),
             encoding="utf-8",
         )
         seen = []
         monkeypatch.setattr(pipeline, "execute",
-                            lambda c, timeout=None: seen.append(c) or Run(str(c), 0, "", "", 0.1))
+                            lambda c, timeout=None, feed="": seen.append((c, feed)) or Run(str(c), 0, "", "", 0.1))
         state = started(Plan("з", [Step("create", "app.py", "")]), touched=["app.py"])
         pipeline.node_verify(state)
 
-        assert "импорт app.py" in state.extra["verified_by"]
-        assert "ждёт ввода" in state.extra["verified_by"]
-        assert seen[0][-1] == "import app", "импортируется модуль, а не запускается файл"
+        assert "с подставленным вводом" in state.extra["verified_by"]
+        assert seen[0][0][-1] == "app.py", "запускается файл, а не импортируется модуль"
         assert state.extra["tests_green"]
+
+    def test_не_хватило_ввода_это_не_провал(self, workspace, monkeypatch):
+        """Программа спросила больше, чем мы дали, — это наша беда, не её."""
+        (workspace / "app.py").write_text(
+            "print(input())" + chr(10) + "print(input())" + chr(10), encoding="utf-8")
+        answers = iter([Run("запуск", 1, "", "EOFError: EOF when reading a line", 0.1),
+                        Run("разбор", 0, "", "", 0.1)])
+        monkeypatch.setattr(pipeline, "execute",
+                            lambda c, timeout=None, feed="": next(answers))
+        state = started(Plan("з", []), touched=["app.py"])
+        pipeline.node_verify(state)
+
+        assert state.extra["tests_green"], "разбор прошёл — значит, не сломано"
+        assert "не хватило" in state.extra["verified_by"]
 
     def test_обычная_программа_по_прежнему_запускается(self, workspace, monkeypatch):
         (workspace / "app.py").write_text("print('привет')\n", encoding="utf-8")
         seen = []
         monkeypatch.setattr(pipeline, "execute",
-                            lambda c, timeout=None: seen.append(c) or Run(str(c), 0, "", "", 0.1))
+                            lambda c, timeout=None, feed="": seen.append(c) or Run(str(c), 0, "", "", 0.1))
         state = started(Plan("з", [Step("create", "app.py", "")]), touched=["app.py"])
         pipeline.node_verify(state)
 
@@ -3100,7 +3128,7 @@ class TestPipelineRun:
         ]))
         results = iter([False, True])
         monkeypatch.setattr(pipeline, "execute",
-                            lambda c, timeout=None: Run(c, 0 if next(results) else 1, "E  assert 0 == 4", "", 0.2))
+                            lambda c, timeout=None, feed="": Run(c, 0 if next(results) else 1, "E  assert 0 == 4", "", 0.2))
 
         state = pipeline.run_pipeline("почини сложение", plan=fix_plan)
         assert state.extra["tests_green"]
@@ -3117,7 +3145,7 @@ class TestPipelineRun:
         monkeypatch.setattr(pipeline, "request_model", model)
         results = iter([False, True])
         monkeypatch.setattr(pipeline, "execute",
-                            lambda c, timeout=None: Run(c, 0 if next(results) else 1, "E  assert 0 == 4", "", 0.2))
+                            lambda c, timeout=None, feed="": Run(c, 0 if next(results) else 1, "E  assert 0 == 4", "", 0.2))
         pipeline.run_pipeline("почини сложение", plan=fix_plan)
 
         second = model.seen[1][-1]["content"]
@@ -3219,7 +3247,7 @@ class TestPipelineRun:
         ]))
         results = iter([False, True])
         monkeypatch.setattr(pipeline, "execute",
-                            lambda c, timeout=None: (ran.append(c),
+                            lambda c, timeout=None, feed="": (ran.append(c),
                                                      Run(c, 0 if next(results) else 1, "E fail", "", 0.2))[1])
         state = pipeline.run_pipeline("почини сложение", plan=fix_plan)
         assert state.extra["tests_green"]
@@ -3588,7 +3616,7 @@ class TestLangGraphPipeline:
         ]))
         results = iter([False, True])
         monkeypatch.setattr(pipeline, "execute",
-                            lambda c, timeout=None: Run(c, 0 if next(results) else 1, "E fail", "", 0.2))
+                            lambda c, timeout=None, feed="": Run(c, 0 if next(results) else 1, "E fail", "", 0.2))
         state = pipeline_lg.run_langgraph_pipeline("почини сложение", plan=fix_plan)
         assert state.steps.count("edit") == 1
         assert state.extra["tests_green"]
@@ -4070,6 +4098,36 @@ class TestEditFunction:
 
         assert (project_map / "app.py").read_text(encoding="utf-8") == self.MODULE
         assert "нет функции main" in " ".join(state.extra["log"])
+
+    def test_новое_рядом_с_правкой_разрешено(self, project_map, monkeypatch):
+        """Чтобы `main` печатала производную, её надо ещё и написать."""
+        answer = file_answer("def main():" + chr(10) + "    print(helper())" + chr(10) * 2 +
+                             "def helper():" + chr(10) + "    return 1" + chr(10))
+        monkeypatch.setattr(pipeline, "request_model", fake_model([answer]))
+        state = started(Plan("з", [Step("search", "app.py", ""), Step("edit", "", "")]))
+        pipeline.node_step(state)
+        pipeline.node_step(state)
+
+        written = (project_map / "app.py").read_text(encoding="utf-8")
+        assert "def helper():" in written
+        assert written.count("def get_roots") == 1
+
+    def test_повтор_существующего_определения_отвергается(self, project_map, monkeypatch):
+        """Живой прогон: в файле оказались два `main` и три `get_roots`.
+
+        `replace_lines` кладёт ответ на место ОДНОЙ функции, поэтому
+        соседи, приехавшие заодно, не заменяют старых, а добавляются
+        к ним. Файл запускается, проверки зелёные, а читать его нельзя.
+        """
+        answer = file_answer("def main():" + chr(10) + "    print(1)" + chr(10) * 2 +
+                             "def get_roots(a, b, c):" + chr(10) + "    return 0" + chr(10))
+        monkeypatch.setattr(pipeline, "request_model", fake_model([answer, answer, answer]))
+        state = started(Plan("з", [Step("search", "app.py", ""), Step("edit", "", "")]))
+        pipeline.node_step(state)
+        pipeline.node_step(state)
+
+        assert "заново определены get_roots" in " ".join(state.extra["log"])
+        assert (project_map / "app.py").read_text(encoding="utf-8").count("def get_roots") == 1
 
     def test_не_вышло_с_функцией_значит_обычная_правка(self, project_map, monkeypatch):
         """Место могло быть выбрано неверно — тогда правка нужна не там."""

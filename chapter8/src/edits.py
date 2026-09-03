@@ -456,6 +456,26 @@ def _nested_names(tree: ast.AST) -> list[str]:
     return found
 
 
+def top_definitions(path: str, text: str) -> list[str]:
+    """Имена определений ВЕРХНЕГО уровня — без вложенных и без методов.
+
+    Пара к `definitions`, которая собирает все имена подряд. Здесь
+    нужны именно верхние: вопрос, на который отвечает эта функция, —
+    «сколько определений в ответе модели», а вложенные принадлежат
+    своему внешнему и отдельными не считаются.
+    """
+    if not path.endswith(".py"):
+        return []
+    try:
+        tree = ast.parse(text)
+    except (SyntaxError, ValueError):
+        return []
+    return [
+        node.name for node in tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+    ]
+
+
 def same_code(before: str, after: str) -> bool:
     """Отличаются ли два текста чем-нибудь, кроме пустых строк.
 

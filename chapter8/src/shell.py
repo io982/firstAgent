@@ -160,7 +160,7 @@ def _environment() -> dict[str, str]:
     return env
 
 
-def execute(command: str | list[str], timeout: float | None = None) -> Run:
+def execute(command: str | list[str], timeout: float | None = None, feed: str = "") -> Run:
     """Запускает команду в рабочем каталоге. Проверок доступа НЕ делает.
 
     Проверки остались снаружи намеренно: эта функция — только запуск,
@@ -171,6 +171,9 @@ def execute(command: str | list[str], timeout: float | None = None) -> Run:
     git-коммита это единственный рабочий способ: сообщение коммита
     пишет человек, в нём бывают и кавычки, и пробелы, и разбирать его
     обратно из строки значит ломать ровно то, что он написал.
+
+    `feed` — то, что программа прочитает со своего ввода. Пусто —
+    ввод закрыт, и программа, ждущая клавиатуры, честно падает на EOF.
     """
     if isinstance(command, str):
         parts = guard.split_command(command)
@@ -205,7 +208,8 @@ def execute(command: str | list[str], timeout: float | None = None) -> Run:
             # наш терминал, заберёт его себе: человек увидит зависший
             # агент вместо приглашения. С закрытым вводом она честно
             # падает на EOF, и это состояние, с которым можно работать.
-            stdin=subprocess.DEVNULL,
+            input=feed if feed else None,
+            stdin=None if feed else subprocess.DEVNULL,
         )
     except subprocess.TimeoutExpired:
         return Run(shown, 124, "", "", time.monotonic() - started, timed_out=True)

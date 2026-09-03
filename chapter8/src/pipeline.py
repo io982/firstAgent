@@ -82,6 +82,7 @@ from chapter8.src.edits import (
     missing_fields,
     same_code,
     syntax_ok,
+    top_definitions,
     without_docstring,
 )
 from chapter8.src.fs import (
@@ -178,6 +179,22 @@ WRITE_TIMEOUT = 300.0
 # тысячи токенов это примерно двести строк кода, и файл длиннее
 # кодинг-агенту на 3B всё равно не по силам.
 WRITE_MAX_TOKENS = 1500
+
+# Что подставляется на ввод программе, которую иначе не запустить.
+#
+# Числа, потому что консольные программы этой главы спрашивают числа:
+# коэффициенты, количества, суммы. «1» годится и как число, и как
+# непустая строка, и как ответ на «сколько». Хвост из пустых строк —
+# под финальное `input('Нажмите Enter')`, которое ничего не читает.
+#
+# Строк с запасом: программа, спросившая больше, чем мы дали, падает
+# EOFError — и это НАША беда, а не её, поэтому такой ответ не считается
+# провалом (см. node_verify).
+SCRIPTED_INPUT = "1\n2\n3\n1\n2\n3\n" + "\n" * 6
+
+# Ошибка, которая означает «ввода не хватило», а не «программа сломана».
+INPUT_RAN_OUT = "EOFError"
+
 
 # Сколько раз просить модель написать файл. Два, и это не запас
 # прочности: файл, который не записался, потерян насовсем — цикл
@@ -1081,8 +1098,21 @@ def _edit_function(state: State, place: dict, detail: str, problem: str = "") ->
     # иногда возвращает соседнюю — а `replace_lines` подставит что дали
     # ровно на место старой, и файл молча лишится определения.
     short = place["name"].rsplit(".", 1)[-1]
-    if short not in definitions(path, textwrap.dedent(content)):
+    written = top_definitions(path, textwrap.dedent(content))
+    if short not in written:
         return False, f"в ответе нет функции {short}, а заменять надо её"
+    # Лишние определения в ответе бывают двух родов, и обходятся они
+    # по-разному. НОВОЕ рядом с правкой — обычное дело: чтобы `main`
+    # печатала производную, её надо ещё и написать, и запрещать это
+    # значит запрещать половину задач. А вот ПОВТОР того, что в файле
+    # уже есть, — беда: `replace_lines` кладёт ответ на место одной
+    # функции, и в файле оказываются два `main` и три `get_roots`.
+    # Такой файл запускается, проверки зелёные, а читать его нельзя.
+    already = set(top_definitions(path, _file_text(path))) - {short}
+    duplicated = [name for name in written if name in already]
+    if duplicated:
+        return False, (f"в ответе заново определены {', '.join(duplicated)} — они в файле уже есть. "
+                       f"Верни функцию {short} и только то новое, что нужно задаче")
 
     touched = guard.change_count()
     result = replace_lines(path, str(place["start"]), str(place["end"]), content)
@@ -1317,7 +1347,26 @@ def node_verify(state: State) -> State:
         # нашлась там, где смысл был обратный. Ровно та ошибка, о которой
         # глава предупреждает в другом месте.
         executed = False
-        if wants_scaffold(state.user_input):
+        if _waits_for_input(entry) and not wants_scaffold(state.user_input):
+            # Программу, ждущую ввода, ЗАПУСКАЕМ с подставленными
+            # строками. Раньше её проверяли импортом или разбором,
+            # и оба молчали про то, ради чего программу пишут: файл
+            # разбирается, импортируется — а запуск падает NameError
+            # или TypeError на первой же строке.
+            #
+            # Ввод кончился (EOFError) — это НАША беда, а не программы:
+            # мы дали меньше строк, чем она спросила. Такой ответ
+            # проваливать нельзя, и ниже он разбирается отдельно.
+            run = execute([interpreter(), entry], timeout=limit, feed=SCRIPTED_INPUT)
+            executed = True
+            state.extra["verified_by"] = f"запуск {entry} с подставленным вводом"
+            if not run.ok and INPUT_RAN_OUT in run.text():
+                executed = False
+                run = execute([interpreter(), "-m", "py_compile", entry], timeout=limit)
+                state.extra["verified_by"] = (
+                    f"разбор {entry} (подставленного ввода не хватило, запуск не досмотрен)"
+                )
+        elif wants_scaffold(state.user_input):
             # Каркас проверяется РАЗБОРОМ, и ничем сильнее.
             #
             # Запуск не подходит: тела пустые, `main()` с многоточием
@@ -1568,9 +1617,25 @@ def node_edit(state: State) -> State:
     """Второй узел, где решает модель: починка после провала проверки."""
     state.extra["attempt"] = int(state.extra.get("attempt", 0)) + 1
     path = state.extra.get("path", "")
+    failure = state.extra.get("failure", "")
+
+    # Ошибка запуска называет функцию — чиним её одну. Traceback
+    # для этого и написан: «TypeError: get_derivative() takes 1
+    # positional argument» указывает и на файл, и на определение,
+    # точнее любой нашей догадки. Раньше починка получала весь файл
+    # и свободу, и на такой однострочной беде проваливала оба круга.
+    place = _place_from_failure(failure)
+    if place:
+        before = guard.change_count()
+        ok, result = _edit_function(state, place, "", failure)
+        state.extra["edit_result"] = result
+        state.extra["edit_ok"] = guard.change_count() > before
+        if state.extra["edit_ok"]:
+            state.extra["edit_form"] = "function"
+            return state
 
     before = guard.change_count()
-    result = _ask_for_edit(state, path, "", failure=state.extra.get("failure", ""))
+    result = _ask_for_edit(state, path, "", failure=failure)
     state.extra["edit_result"] = result
     # Успех правки определяется по журналу изменений, а не по тексту
     # ответа инструмента. Первая версия смотрела на текст — искала в нём
@@ -1584,6 +1649,29 @@ def node_edit(state: State) -> State:
     if state.extra["edit_ok"]:
         _remember(state, path)
     return state
+
+
+# Имя функции в тексте ошибки: «get_derivative() takes 1 positional
+# argument» или строка traceback «in get_derivative». Оба вида дают
+# имя, по которому карта находит файл и границы.
+#
+# Без `\b`: границы слова здесь ничего не добавляют — имя и так
+# ограничено скобками или словом «in», — а лишний символ в шаблоне
+# это лишний способ ошибиться.
+FAILED_CALL = re.compile(r"([A-Za-z_]\w*)\(\)|in\s+([A-Za-z_]\w*)")
+
+
+def _place_from_failure(failure: str) -> dict | None:
+    """Функция, названная в ошибке запуска, — если такая есть в карте."""
+    names = [n for pair in FAILED_CALL.findall(failure or "") for n in pair if n]
+    for name in names:
+        if name in ("main", "module"):
+            continue
+        found = codemap.find(name)
+        if found:
+            return {"path": found.path, "name": found.name,
+                    "start": found.start, "end": found.end}
+    return None
 
 
 def _ask_for_edit(state: State, path: str, detail: str, failure: str = "",
