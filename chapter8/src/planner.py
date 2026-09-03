@@ -44,6 +44,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 from dataclasses import dataclass, field
 
@@ -482,6 +483,84 @@ def wants_scaffold(task: str) -> bool:
     return matches(f" {task.lower().strip()} ", SCAFFOLD_WORDS)
 
 
+# Латинские слова длиннее двух букв — кандидаты в имена из кода.
+# Русские слова сюда не попадают намеренно: искать «ожидание» внутри
+# файлов бессмысленно, а `df_dx` — ровно то, что человек процитировал
+# из своего же кода.
+CODE_WORD = re.compile(r"[A-Za-z_][A-Za-z_0-9]{2,}")
+
+# Слова, которые в задаче встречаются постоянно и файл не адресуют.
+COMMON_WORDS = frozenset({
+    "python", "windows", "bat", "print", "input", "def", "import", "return",
+    "true", "false", "none", "self", "test", "tests", "main", "the", "for",
+})
+
+
+def code_word(task: str) -> str:
+    """Самое длинное слово задачи, похожее на имя из кода.
+
+    Нужно, когда человек просит правку, не называя файла, но цитируя
+    его содержимое: «добавь после print(f'd/dx = {df_dx}') ожидание
+    ввода». Файл здесь не назван, зато названо `df_dx` — и по нему файл
+    находится поиском, тем самым, что и так стоит первым шагом плана
+    правки.
+
+    Берётся самое длинное слово, а не первое: `print` есть в каждом
+    втором файле, а `df_dx` — в одном.
+    """
+    words = [w for w in CODE_WORD.findall(task) if w.lower() not in COMMON_WORDS]
+    return max(words, key=len, default="")
+
+
+def recent_file() -> str:
+    """Файл рабочего каталога, изменённый последним.
+
+    Запасной адрес для правки без названия и без цитаты: «исправь: оно
+    не должно закрываться сразу» — ни имени файла, ни слова из кода,
+    а человек совершенно точно имеет в виду то, что мы только что
+    написали вместе.
+    """
+    root = guard.get_workspace()
+    files = [p for p in root.glob("*") if p.is_file() and p.suffix in CODE_SUFFIXES]
+    if not files:
+        return ""
+    return guard.relative(max(files, key=lambda p: p.stat().st_mtime))
+
+
+def edit_address(task: str) -> str:
+    """Как адресовать правку, когда файл не назван: цитатой или последним файлом.
+
+    Возвращается не обязательно путь: слово из кода тоже годится, потому
+    что первым шагом плана правки стоит `search`, а он умеет и то,
+    и другое — путь берёт как есть, остальное ищет по тексту.
+
+    Раньше такая задача уходила в ветку «имя файла не назвали» и
+    кончалась созданием НОВОГО файла с именем от модели. Живой прогон:
+    «добавь после print(f'd/dx = {df_dx}') ожидание ввода» дало план
+    «create quadratic.py» — при том, что правку просили в main.py,
+    написанном пятью минутами раньше. Глагол в задаче был «добавь»,
+    то есть правка, а код читал его как «напиши что-нибудь новое».
+    """
+    word = code_word(task)
+    if word and _first_hit(word):
+        return word
+    return recent_file()
+
+
+def _first_hit(needle: str) -> str:
+    """Первый файл рабочего каталога, где встречается строка."""
+    root = guard.get_workspace()
+    for path in sorted(root.glob("*")):
+        if not path.is_file() or path.suffix not in CODE_SUFFIXES:
+            continue
+        try:
+            if needle in path.read_text(encoding="utf-8"):
+                return guard.relative(path)
+        except (OSError, UnicodeDecodeError):
+            continue
+    return ""
+
+
 def plan_kind(task: str) -> tuple[str, str]:
     """Каким планом делается эта задача. Пара «вид, целевой файл».
 
@@ -503,7 +582,10 @@ def plan_kind(task: str) -> tuple[str, str]:
       3. названный существующий файл — правим. Глагол не обязателен:
          «в calc.py функция add вычитает» — задача без повелительного
          наклонения, и это самая частая форма просьбы;
-      4. всё остальное — одна программа, имя которой не назвали.
+      4. глагол правки без названного файла — правим то, над чем
+         работали: адрес ищется цитатой из задачи или последним
+         изменённым файлом;
+      5. всё остальное — одна программа, имя которой не назвали.
     """
     lowered = f" {task.lower().strip()} "
 
@@ -520,6 +602,17 @@ def plan_kind(task: str) -> tuple[str, str]:
             return KIND_NEEDS_NAME, ""
         if path.is_file():
             return KIND_FIX, guard.relative(path)
+
+    # Правка без названного файла — это ПРАВКА, а не «напиши новое».
+    # Глагол сказан, файл не назван: значит, речь о том, над чем
+    # работали, и адрес ищется цитатой из задачи или последним
+    # изменённым файлом. Прежде такая задача уходила в ветку «имя
+    # не назвали» и кончалась новым файлом с именем от модели —
+    # рядом с тем, который просили поправить.
+    if matches(lowered, EDIT_VERBS) and not matches(lowered, CREATE_VERBS):
+        address = edit_address(task)
+        if address:
+            return KIND_FIX, address
 
     return KIND_NEEDS_NAME, ""
 

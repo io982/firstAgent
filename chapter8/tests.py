@@ -1512,6 +1512,59 @@ class TestFixOrScratch:
         assert "больше одной вещи" in plan.problems[0]
 
 
+class TestEditWithoutName:
+    """Правка без названного файла — это правка, а не «напиши новое».
+
+    Живой прогон: человек написал «добавь после print(f'd/dx = {df_dx}')
+    ожидание ввода», имея в виду main.py, написанный пятью минутами
+    раньше. План вышел «create quadratic.py» — новый файл с именем
+    от модели, рядом с тем, который просили поправить. Глагол в задаче
+    был «добавь», то есть правка, а код читал его как «напиши что-нибудь».
+    """
+
+    @pytest.fixture
+    def project_pair(self, workspace):
+        """Модуль и батник рядом. Батник моложе — он и есть «последний»."""
+        (workspace / "main.py").write_text(
+            "def main():\n    df_dx = 2\n    print(f'd/dx = {df_dx}')\n", encoding="utf-8")
+        time.sleep(0.05)
+        (workspace / "run.bat").write_text("@echo off\npython main.py\n", encoding="utf-8")
+        return workspace
+
+    def test_цитата_из_кода_адресует_файл(self, project_pair):
+        """`df_dx` есть ровно в одном файле — по нему и найдётся."""
+        task = "добавь после print(f'd/dx = {df_dx}') ожидание ввода любой кнопки"
+        kind, target = plan_kind(task)
+        assert kind == "fix"
+        assert target == "df_dx", "адресом может быть и слово: искать умеет шаг search"
+        assert [s.action for s in fallback_plan(task).steps] == ["search", "edit", "test"]
+
+    def test_без_цитаты_берётся_последний_изменённый(self, project_pair):
+        task = "исправь: оно не должно закрываться сразу после вывода результата"
+        assert plan_kind(task) == ("fix", "run.bat")
+
+    def test_частые_слова_адресом_не_считаются(self, project_pair):
+        """`print` есть в каждом втором файле и не адресует ничего."""
+        assert planner_module.code_word("добавь print в конец") == ""
+
+    def test_самое_длинное_слово_а_не_первое(self):
+        assert planner_module.code_word("поправь calc_total в модуле") == "calc_total"
+
+    def test_слова_которых_в_проекте_нет_не_адресуют(self, project_pair):
+        """Выдуманное имя не должно уводить поиск в никуда — берём последний файл."""
+        assert plan_kind("поправь незнакомое_имя_которого_нет") == ("fix", "run.bat")
+
+    def test_глагол_создания_по_прежнему_создаёт(self, project_pair):
+        assert plan_kind("напиши приложение которое считает факториал") == ("needs_name", "")
+
+    def test_названный_файл_важнее_догадки(self, project_pair):
+        assert plan_kind("поправь main.py, сложение неверное") == ("fix", "main.py")
+
+    def test_в_пустом_каталоге_правка_остаётся_без_адреса(self, workspace):
+        """Править нечего — значит, надо писать, и это прежняя ветка."""
+        assert plan_kind("добавь ожидание ввода") == ("needs_name", "")
+
+
 class TestAskFilename:
     """Единственное, что кодом не выводится, — имя файла."""
 
