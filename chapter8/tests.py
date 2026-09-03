@@ -34,7 +34,7 @@ from chapter7.src.agents import SPECIALISTS, Team
 from chapter7.src.graph import State
 from chapter7.src.models import using_model
 from chapter8.agent import handle
-from chapter8.src import env, guard, pipeline, pipeline_lg
+from chapter8.src import codemap, env, guard, pipeline, pipeline_lg
 from chapter8.src import planner as planner_module
 from chapter8.src.edits import (
     ANCHOR,
@@ -3597,6 +3597,199 @@ class TestLangGraphAbsence:
         monkeypatch.setattr(pipeline_lg, "IMPORT_PROBLEM", "No module named 'langgraph'")
         with pytest.raises(RuntimeError, match="pip install langgraph"):
             pipeline_lg.build_langgraph_pipeline()
+
+
+# ====================================================================
+# КАРТА КОДА: ЧТО ЕСТЬ В ПРОЕКТЕ И ЧТО ОНО ДЕЛАЕТ
+# ====================================================================
+
+SAMPLE_MODULE = (
+    "import math\n"
+    "\n\n"
+    "def solve(a, b, c):\n"
+    '    """Возвращает корни уравнения.\n'
+    "\n"
+    "    Вторая строка описания в карту не идёт.\n"
+    '    """\n'
+    "    return a\n"
+    "\n\n"
+    "class Cart:\n"
+    '    """Корзина покупок."""\n'
+    "\n"
+    "    def add(self, item):\n"
+    "        return item\n"
+    "\n\n"
+    "def main():\n"
+    "    def inner():\n"
+    "        return 1\n"
+    "    return inner()\n"
+)
+
+
+@pytest.fixture
+def mapped(workspace, monkeypatch):
+    """Проект с картой во временном файле: настоящая лежит рядом с главой."""
+    monkeypatch.setenv("AGENT_CODEMAP_FILE", str(workspace / "codemap.json"))
+    (workspace / "quadratic.py").write_text(SAMPLE_MODULE, encoding="utf-8")
+    codemap.forget_cache()
+    yield workspace
+    codemap.forget_cache()
+
+
+class TestCodeMap:
+    """Карта проекта: имена, границы и назначение каждой функции.
+
+    Заводится ради выбора МЕСТА правки. Пока место ищется текстовым
+    поиском, оно находится только если человек процитировал свой код.
+    Стоит ему сказать по-человечески — «сделай чтобы приложение выводило
+    ещё и производную», — и искать нечего: агент угадывает файл или
+    заводит новый рядом с тем, который просили поправить.
+    """
+
+    def test_функции_и_классы_видны(self, mapped):
+        assert codemap.names() == ["solve", "Cart", "Cart.add", "main"]
+
+    def test_метод_называется_вместе_с_классом(self, mapped):
+        """`add` в проекте бывает не один, а выбирать модель будет по имени."""
+        assert codemap.find("Cart.add").kind == "метод"
+
+    def test_вложенная_функция_в_карту_не_идёт(self, mapped):
+        """Заменять замыкание отдельно от его функции бессмысленно."""
+        assert "inner" not in codemap.names()
+
+    def test_назначение_берётся_из_докстринга(self, mapped):
+        assert codemap.find("solve").purpose == "Возвращает корни уравнения."
+
+    def test_границы_включают_всё_определение(self, mapped):
+        item = codemap.find("solve")
+        source = codemap.source_of(item)
+        assert source.startswith("def solve(a, b, c):")
+        assert source.rstrip().endswith("return a")
+
+    def test_декоратор_входит_в_границы(self, workspace, monkeypatch):
+        """Замена по строкам без декоратора оставила бы `@tool` над чужим определением."""
+        monkeypatch.setenv("AGENT_CODEMAP_FILE", str(workspace / "codemap.json"))
+        (workspace / "tools.py").write_text(
+            "def tool(f):\n    return f\n\n\n@tool\ndef run():\n    return 1\n", encoding="utf-8")
+        codemap.forget_cache()
+        assert codemap.source_of(codemap.find("run")).startswith("@tool")
+
+    def test_метод_ищется_по_короткому_имени(self, mapped):
+        assert codemap.find("add").name == "Cart.add"
+
+    def test_сломанный_файл_карту_не_роняет(self, workspace, monkeypatch):
+        monkeypatch.setenv("AGENT_CODEMAP_FILE", str(workspace / "codemap.json"))
+        (workspace / "broken.py").write_text("def f(:\n", encoding="utf-8")
+        (workspace / "fine.py").write_text("def g():\n    return 1\n", encoding="utf-8")
+        codemap.forget_cache()
+        assert codemap.names() == ["g"]
+
+    def test_подкаталоги_тоже_читаются(self, mapped):
+        (mapped / "src").mkdir()
+        (mapped / "src" / "util.py").write_text("def helper():\n    return 1\n", encoding="utf-8")
+        codemap.forget_cache()
+        assert "helper" in codemap.names()
+
+    def test_карта_пересобирается_после_правки(self, mapped):
+        assert "extra" not in codemap.names()
+        path = mapped / "quadratic.py"
+        path.write_text(path.read_text(encoding="utf-8") + "\n\ndef extra():\n    return 2\n",
+                        encoding="utf-8")
+        os.utime(path, (time.time() + 1, time.time() + 1))
+        assert "extra" in codemap.names()
+
+    def test_пустой_каталог_говорит_об_этом(self, workspace, monkeypatch):
+        monkeypatch.setenv("AGENT_CODEMAP_FILE", str(workspace / "codemap.json"))
+        codemap.forget_cache()
+        assert "нет ни одной функции" in codemap.render()
+
+
+class TestPurposes:
+    """Назначение: докстринг, потом хранилище, и только потом модель."""
+
+    def test_модель_зовётся_только_для_безымянных(self, mapped, monkeypatch):
+        model = fake_model([json.dumps({"purposes": [{"name": "Cart.add", "purpose": "перебирает корзину"},
+                                                  {"name": "main", "purpose": "точка входа"}]})])
+        monkeypatch.setattr(codemap, "request_model", model)
+        described = codemap.describe(codemap.scan())
+
+        assert described == 2, "у solve и Cart описания уже есть, спрашивать нечего"
+        asked = model.seen[0][-1]["content"]
+        assert "Cart.add" in asked and "main" in asked
+        assert "solve" not in asked.split("Исходный код:")[0]
+
+    def test_описание_переживает_перезапуск(self, mapped, monkeypatch):
+        monkeypatch.setattr(codemap, "request_model",
+                            fake_model([json.dumps({"purposes": [{"name": "Cart.add", "purpose": "перебирает корзину"},
+                                                  {"name": "main", "purpose": "точка входа"}]})]))
+        codemap.describe(codemap.scan())
+        codemap.forget_cache()
+        assert codemap.find("main").purpose == "Точка входа"
+
+    def test_правка_функции_обесценивает_описание(self, mapped, monkeypatch):
+        """Описание живёт дольше кода, и без отпечатка тела оно врало бы."""
+        monkeypatch.setattr(codemap, "request_model",
+                            fake_model([json.dumps({"purposes": [{"name": "Cart.add", "purpose": "перебирает корзину"},
+                                                  {"name": "main", "purpose": "точка входа"}]})]))
+        codemap.describe(codemap.scan())
+
+        path = mapped / "quadratic.py"
+        path.write_text(path.read_text(encoding="utf-8").replace("return inner()", "return 42"),
+                        encoding="utf-8")
+        os.utime(path, (time.time() + 1, time.time() + 1))
+        assert codemap.find("main").purpose == "", "тело изменилось — описание больше не про него"
+
+    def test_описание_едет_к_своей_функции(self, mapped, monkeypatch):
+        """Живой прогон: на паре get_roots/main модель описала первую дважды.
+
+        Порядок ответа проверить нечем — перепутанный выглядит как
+        правильный. Имя из `enum` проверяется грамматикой, а повтор
+        отбрасывается: описание, приехавшее дважды, означает, что модель
+        спутала функции, и второе такое же неверно, как первое.
+        """
+        monkeypatch.setattr(codemap, "request_model", fake_model([json.dumps({"purposes": [
+            {"name": "main", "purpose": "точка входа"},
+            {"name": "main", "purpose": "и снова точка входа"},
+        ]})]))
+        assert codemap.describe(codemap.scan()) == 1
+        assert codemap.find("main").purpose == "Точка входа"
+        assert codemap.find("Cart.add").purpose == "", "своего описания не приехало"
+
+    def test_молчание_модели_карту_не_роняет(self, mapped, monkeypatch):
+        def boom(*a, **k):
+            raise ConnectionError("Ollama молчит")
+
+        monkeypatch.setattr(codemap, "request_model", boom)
+        assert codemap.describe(codemap.scan()) == 0
+        assert codemap.names(), "карта остаётся, просто без описаний"
+
+    def test_имя_в_схеме_это_перечисление(self):
+        """Назвать функцию, которой нет, модель не сможет физически."""
+        schema = codemap.purpose_schema(["solve", "main"])
+        item = schema["properties"]["purposes"]["items"]
+        assert item["properties"]["name"]["enum"] == ["solve", "main"]
+        assert schema["properties"]["purposes"]["maxItems"] == 2
+
+    @pytest.mark.parametrize("name,answer,expected", [
+        ("solve", "Функция solve(a, b, c) решает уравнение", "Решает уравнение"),
+        ("main", "Функция main() запрашивает коэффициенты", "Запрашивает коэффициенты"),
+        ("Cart.add", "добавляет товар", "Добавляет товар"),
+        ("derivative", "derivative(a, b) — считает производную", "Считает производную"),
+        # Имя снимается только целым словом: без проверки границы
+        # описание метода `add` со словом «Adds» превращалось
+        # в «S an item to the cart».
+        ("Cart.add", "Adds an item to the cart", "Adds an item to the cart"),
+        ("total", "Totals everything", "Totals everything"),
+    ])
+    def test_начало_ответа_подчищается(self, name, answer, expected):
+        """«Без слова функция в начале» модель нарушает: так написано в её данных."""
+        assert codemap.tidy_purpose(name, answer) == expected
+
+    def test_длинное_описание_режется_по_слову(self):
+        long = "Решает " + "очень " * 40 + "длинно"
+        tidied = codemap.tidy_purpose("f", long)
+        assert len(tidied) <= codemap.PURPOSE_LIMIT + 1
+        assert tidied.endswith("…")
 
 
 # ====================================================================
