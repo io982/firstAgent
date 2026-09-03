@@ -2435,11 +2435,33 @@ class TestStrayDefinitions:
         after = "try:\n    import json\nexcept ImportError:\n    def json():\n        return None\n"
         assert stray_definitions("a.py", "", after) == []
 
-    def test_правка_отменяется_и_файл_цел(self, workspace):
+    def test_дописывание_снимает_сбитый_отступ(self, workspace):
+        """Механическую беду чинят механически, а не третьей просьбой.
+
+        Три захода подряд давали один и тот же отступ. Снять его кодом
+        и сказать об этом — честнее и дешевле, чем спорить промптом.
+        Приём тот же, что у `normalize_edit`.
+        """
         (workspace / "app.py").write_text(self.BEFORE, encoding="utf-8")
-        answer = append_to_file("app.py", "    def derivative(a, b):\n        return 2*a\n")
+        answer = append_to_file("app.py", "    def derivative(a, b):" + chr(10) + "        return 2*a" + chr(10))
+        assert "снят лишний отступ" in answer
+        written = (workspace / "app.py").read_text(encoding="utf-8")
+        assert stray_definitions("app.py", self.BEFORE, written) == []
+        assert "def derivative" in written
+
+    def test_законный_отступ_не_трогают(self, workspace):
+        """Дописать строку ВНУТРЬ блока `__main__` — обычное дело."""
+        (workspace / "app.py").write_text(self.BEFORE, encoding="utf-8")
+        append_to_file("app.py", "        print('готово')" + chr(10))
+        assert "        print('готово')" in (workspace / "app.py").read_text(encoding="utf-8")
+
+    def test_вложенное_определение_через_номера_строк_отменяется(self, workspace):
+        """Что нельзя починить снятием отступа — отменяется с объяснением."""
+        before = "if True:" + chr(10) + "    pass" + chr(10)
+        (workspace / "app.py").write_text(before, encoding="utf-8")
+        answer = replace_lines("app.py", "2", "2", "    def f():" + chr(10) + "        return 1")
         assert "ВНУТРИ чужого блока" in answer
-        assert (workspace / "app.py").read_text(encoding="utf-8") == self.BEFORE
+        assert (workspace / "app.py").read_text(encoding="utf-8") == before
 
 
 class TestSameCode:

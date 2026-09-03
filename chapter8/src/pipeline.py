@@ -68,7 +68,9 @@ from chapter7.src.models import using_model
 from chapter8.src import env, guard
 from chapter8.src.edits import (
     ANCHOR,
+    ANCHOR_MISSED,
     APPEND,
+    EDIT_FORMS,
     FULL,
     LINES,
     definitions,
@@ -105,7 +107,15 @@ from chapter8.src.planner import (
     validate_plan,
     wants_scaffold,
 )
-from chapter8.src.shell import clip, execute, first_error, interpreter, suite_passed
+from chapter8.src.shell import (
+    Run,
+    clip,
+    execute,
+    first_error,
+    interpreter,
+    suite_passed,
+    undefined_names,
+)
 
 # Модель, которая ПИШЕТ и ЧИНИТ код. Отдельная от модели разговора
 # по той же причине, по которой планировщик — отдельный параметр:
@@ -911,12 +921,21 @@ def _step_edit(step, state: State) -> tuple[bool, str]:
     state.extra["path"] = path
 
     problem = ""
+    forms: tuple[str, ...] | None = None
     for _ in range(EDIT_ATTEMPTS):
         was = _file_text(path)
         touched = guard.change_count()
-        result = _ask_for_edit(state, path, step.detail, problem)
+        result = _ask_for_edit(state, path, step.detail, problem, forms)
         if guard.change_count() == touched:
             problem = result
+            # Якорь не найден — значит, модель не может процитировать
+            # строку точно. Просить её о том же второй раз бессмысленно:
+            # живой прогон дал четыре одинаковых отказа подряд, до буквы
+            # один и тот же выдуманный якорь. Убираем форму из схемы —
+            # адрес по номерам строк у нас уже есть, он показан модели
+            # слева от каждой строки файла.
+            if ANCHOR_MISSED in result:
+                forms = tuple(form for form in EDIT_FORMS if form != ANCHOR)
             continue
         # Файл изменился — но изменился ли КОД. Модель умеет ответить
         # правкой, где якорь заменяется сам на себя плюс пустая строка:
@@ -1183,6 +1202,26 @@ def node_verify(state: State) -> State:
             state.extra["verified_by"] = f"запуск {entry}"
         green = run.ok
 
+        # Программу, которую нельзя запустить, мы проверили импортом
+        # или разбором — а оба молчат про то, ради чего программу пишут.
+        # Живой прогон: агент дописал `print('Derivative:', 2*a*root + b)`
+        # в блок `__main__`, где ни `a`, ни `root`, ни `b` не существуют.
+        # Файл разбирается, импортируется, агент рапортует «Готово» —
+        # а запуск падает NameError на первой же строке.
+        #
+        # Неопределённые имена — это статическая замена того запуска,
+        # которого у нас нет. Спрашиваем у ruff, а не считаем сами:
+        # разбор областей видимости — работа линтера, и писать второй
+        # линтер в учебной главе значит писать его с ошибками. Нет
+        # линтера — нет и проверки, глава от этого не ломается.
+        if green and "запуск" not in state.extra["verified_by"]:
+            unknown = undefined_names(entry)
+            if unknown:
+                green = False
+                run = Run(run.command, 1,
+                          f"NameError ждёт при запуске: имена не определены — {', '.join(unknown)}",
+                          "", run.seconds)
+
     state.extra["tests_green"] = green
     state.extra["failure"] = "" if green else first_error(run.text())
     state.extra["verify_output"] = clip(run.text(), 800)
@@ -1375,8 +1414,14 @@ def node_edit(state: State) -> State:
     return state
 
 
-def _ask_for_edit(state: State, path: str, detail: str, failure: str = "") -> str:
-    """Один запрос к модели за правкой и её применение."""
+def _ask_for_edit(state: State, path: str, detail: str, failure: str = "",
+                  forms: tuple[str, ...] | None = None) -> str:
+    """Один запрос к модели за правкой и её применение.
+
+    `forms` сужает схему до перечисленных форм. Нужно во второй попытке:
+    форму, которая только что не сработала, лучше убрать из грамматики,
+    чем просить не пользоваться ею словами.
+    """
     user = f"Задача: {state.user_input}\n"
     if detail:
         user += f"Шаг плана: {detail}\n"
@@ -1391,7 +1436,7 @@ def _ask_for_edit(state: State, path: str, detail: str, failure: str = "") -> st
     messages = [{"role": "system", "content": EDIT_RULES}, {"role": "user", "content": user}]
     try:
         with using_model(coder_model()):
-            raw = request_model(messages, response_format=edit_schema())
+            raw = request_model(messages, response_format=edit_schema(forms))
         data = json.loads(raw)
     except Exception as exc:  # noqa: BLE001
         return f"модель не дала правку: {exc}"

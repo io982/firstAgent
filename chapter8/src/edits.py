@@ -56,6 +56,7 @@ from __future__ import annotations
 
 import ast
 import difflib
+import textwrap
 from dataclasses import dataclass
 
 # Имена форм. Строками, а не Enum: они уезжают в JSON плана и в отчёт
@@ -127,7 +128,7 @@ def apply_anchor(text: str, old: str, new: str) -> EditResult:
         count = text.count(candidate)
 
     if count == 0:
-        return EditResult(False, f"Якорь в файле не найден.{_nearest(text, old)}", text, ANCHOR)
+        return EditResult(False, f"{ANCHOR_MISSED}.{_nearest(text, old)}", text, ANCHOR)
     if count > 1:
         return EditResult(
             False,
@@ -295,8 +296,25 @@ def apply_append(text: str, content: str) -> EditResult:
         if not head.endswith(eol + eol):
             head += eol
 
-    added = len(plain.splitlines())
-    return EditResult(True, f"Дописано в конец файла ({added} строк).", head + body, APPEND)
+    note = ""
+    # Определение, уехавшее внутрь чужого блока, — это сбитый отступ,
+    # и чинится он механически. Живой прогон: на «добавь производную»
+    # модель раз за разом отвечала телом с четырьмя пробелами, и `def`
+    # приклеивался к блоку `if __name__`, стоявшему в конце файла.
+    # Функция после этого объявляется только внутри условия и не зовётся
+    # никогда. Просить модель ещё раз бесполезно — три захода подряд
+    # дали один и тот же отступ; снять его кодом и сказать об этом
+    # честнее и дешевле. Приём тот же, что у `normalize_edit`: понять
+    # ответ модели не буквально, но не молча.
+    if plain[:1].isspace() and _stray_names(text, head + body):
+        flat = textwrap.dedent(plain)
+        candidate = head + flat.replace(chr(10), eol) + eol
+        if not _stray_names(text, candidate) and syntax_ok("x.py", candidate)[0]:
+            body = flat.replace(chr(10), eol) + eol
+            note = " (снят лишний отступ: определения ставятся на верхний уровень)"
+
+    added = len(body.strip().splitlines())
+    return EditResult(True, f"Дописано в конец файла ({added} строк).{note}", head + body, APPEND)
 
 
 def syntax_ok(path: str, text: str) -> tuple[bool, str]:
@@ -392,6 +410,11 @@ def stray_definitions(path: str, before: str, after: str) -> list[str]:
     """
     if not path.endswith(".py") or not before.strip():
         return []
+    return _stray_names(before, after)
+
+
+def _stray_names(before: str, after: str) -> list[str]:
+    """То же самое, но без разговоров про имя файла. Для внутренних проверок."""
     try:
         old = ast.parse(before)
         new = ast.parse(after)
@@ -523,6 +546,12 @@ FIELD_TYPES = {
 
 # Какие поля нужны каждой форме сверх `form` и `path`, только именами.
 REQUIRED_FIELDS = {form: tuple(fields) for form, fields in FIELD_TYPES.items()}
+
+
+# Отказ, по которому конвейер узнаёт: модель не смогла процитировать
+# строку. Константой, а не строкой в двух местах: проверка совпадения
+# текста — ровно тот способ ошибиться, на котором глава уже обжигалась.
+ANCHOR_MISSED = "Якорь в файле не найден"
 
 
 def edit_schema(forms: tuple[str, ...] | None = None) -> dict:

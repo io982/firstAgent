@@ -405,12 +405,34 @@ RUNNABLE_SUFFIXES = (".py", ".bat", ".cmd", ".sh", ".ps1")
 # батник», «нужен yaml». Нужны для одного вопроса — назван ли в задаче
 # целевой файл или только соседний, на который она ссылается.
 KIND_WORDS = {
-    "bat": ".bat", "батник": ".bat", "батник.": ".bat", "cmd": ".cmd",
+    "bat": ".bat", "cmd": ".cmd",
     "sh": ".sh", "bash": ".sh", "shell": ".sh",
     "ps1": ".ps1", "powershell": ".ps1",
     "json": ".json", "yaml": ".yaml", "yml": ".yaml", "toml": ".toml",
     "markdown": ".md", "readme": ".md",
 }
+
+# Русские названия тех же видов — ОСНОВАМИ, как маркеры задач.
+# Словарём по целым словам их не покрыть: человек пишет и «батник»,
+# и «батника», и «бат файл», и каждое пропущенное написание уводит
+# правку в другой файл. Живой прогон споткнулся ровно об это:
+# «исправь бат файл в проекте» дало план про quadratic.py.
+KIND_STEMS = (
+    ("батник", ".bat"), ("бат", ".bat"),
+    ("шелл", ".sh"), ("повершелл", ".ps1"),
+    ("джейсон", ".json"), ("ямл", ".yaml"),
+    ("ридми", ".md"), ("разметк", ".md"),
+)
+
+
+def kind_of_word(word: str) -> str:
+    """Вид файла по одному слову задачи. Пусто — слово не про вид."""
+    if word in KIND_WORDS:
+        return KIND_WORDS[word]
+    for stem, suffix in KIND_STEMS:
+        if word.startswith(stem):
+            return suffix
+    return ""
 
 # Глаголы создания и глаголы правки. Основами, как везде в курсе.
 CREATE_VERBS = ("напиш", "созда", "сдела", "реализ", "сгенерир", "наброса")
@@ -460,7 +482,7 @@ def asks_other_kind(task: str, named: str) -> bool:
         return False
     suffix = "." + named.rsplit(".", 1)[-1].lower()
     words = task.lower().replace(",", " ").replace("-", " ").split()
-    return any(KIND_WORDS[w] != suffix for w in words if w in KIND_WORDS)
+    return any(kind_of_word(w) not in ("", suffix) for w in words)
 
 
 def wants_tests(task: str) -> bool:
@@ -576,6 +598,30 @@ def project_listing(limit: int = 12) -> list[str]:
     return names[:limit]
 
 
+def asked_kind(task: str) -> str:
+    """Суффикс файла, вид которого назван в задаче: «поправь батник» → «.bat».
+
+    Пара к `asks_other_kind`, и словарь у них общий. Там вид файла нужен,
+    чтобы понять «имя в задаче — это ссылка, а не цель»; здесь — чтобы
+    найти сам файл, когда имени нет вовсе.
+    """
+    words = task.lower().replace(",", " ").replace(".", " ").replace("-", " ").split()
+    for word in words:
+        found = kind_of_word(word)
+        if found:
+            return found
+    return ""
+
+
+def newest_of_kind(suffix: str) -> str:
+    """Самый свежий файл названного вида в рабочем каталоге."""
+    root = guard.get_workspace()
+    files = [p for p in root.rglob("*") if p.is_file() and p.suffix == suffix]
+    if not files:
+        return ""
+    return guard.relative(max(files, key=lambda p: p.stat().st_mtime))
+
+
 def edit_address(task: str) -> str:
     """Как адресовать правку, когда файл не назван: цитатой или последним файлом.
 
@@ -583,10 +629,11 @@ def edit_address(task: str) -> str:
     что первым шагом плана правки стоит `search`, а он умеет и то,
     и другое — путь берёт как есть, остальное ищет по тексту.
 
-    Порядок такой: цитата из задачи, потом память сессии, потом время
-    изменения. Цитата первая, потому что это единственное СКАЗАННОЕ
-    человеком; остальные два — догадки, и лучшая из них та, что помнит,
-    над чем работали вместе.
+    Порядок такой: названный вид файла, цитата из задачи, память сессии,
+    время изменения. Первые два — СКАЗАННОЕ человеком, и вид идёт
+    раньше: «поправь батник» адресует файл прямо, а цитата лишь
+    показывает, где внутри. Остальные два — догадки, и лучшая из них
+    та, что помнит, над чем работали вместе.
 
     Раньше такая задача уходила в ветку «имя файла не назвали» и
     кончалась созданием НОВОГО файла с именем от модели. Живой прогон:
@@ -595,6 +642,17 @@ def edit_address(task: str) -> str:
     написанном пятью минутами раньше. Глагол в задаче был «добавь»,
     то есть правка, а код читал его как «напиши что-нибудь новое».
     """
+    # Вид файла назван — это сказано прямо, и спорить с этим нечему.
+    # Живой прогон: «исправь бат файл в проекте» дало план про
+    # quadratic.py, потому что батник агент трогал раньше, а память
+    # помнила последний питоновский файл. Человек назвал вид — значит,
+    # он и есть адрес.
+    kind = asked_kind(task)
+    if kind:
+        named_kind = newest_of_kind(kind)
+        if named_kind:
+            return named_kind
+
     word = code_word(task)
     if word and _first_hit(word):
         return word

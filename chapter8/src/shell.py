@@ -351,10 +351,42 @@ def run_lint(path: str = ".") -> str:
     except guard.OutsideWorkspace as exc:
         return str(exc)
 
-    run = execute(f"python -m ruff check {where}")
+    run = execute([interpreter(), "-m", "ruff", "check", where])
     if run.code == 127 or "No module named" in run.text():
         return "Линтер ruff не установлен. Поставьте: pip install ruff"
     return run.summary()
+
+
+def undefined_names(path: str) -> list[str]:
+    """Имена, которые файл использует, но нигде не определяет.
+
+    Спрашивается у ruff (правило F821), а не считается самим: разобрать
+    области видимости Python правильно — работа линтера, и делать её
+    заново в учебной главе значит написать второй линтер с ошибками.
+
+    Пустой список, если ruff не установлен. Проверка НЕОБЯЗАТЕЛЬНАЯ:
+    она делает агента строже там, где линтер есть, и не ломает главу
+    там, где его нет.
+    """
+    if not path.endswith(".py"):
+        return []
+    try:
+        where = guard.relative(guard.resolve_path(path))
+    except guard.OutsideWorkspace:
+        return []
+
+    run = execute([interpreter(), "-m", "ruff", "check", "--select", "F821",
+                   "--no-cache", "--output-format", "concise", where], timeout=60.0)
+    if run.code == 127 or "No module named" in run.text():
+        return []
+
+    names = []
+    for line in run.text().splitlines():
+        if "F821" in line and "`" in line:
+            name = line.split("`")[1]
+            if name not in names:
+                names.append(name)
+    return names
 
 
 # Имена инструментов запуска — для выборки специалиста и схемы ответа.
