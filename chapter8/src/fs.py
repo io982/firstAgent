@@ -241,6 +241,13 @@ def read_lines(path: str, start: str = "1", end: str = "") -> str:
 
     if first > total:
         return f"В файле {guard.relative(target)} всего {total} строк, а запрошена {first}."
+    # Конец раньше начала — это ошибка вызова, и молчать о ней нельзя.
+    # Прежде такой запрос отвечал заголовком «a.py:3-1» и пустым телом:
+    # модель получала бессмысленный ответ, из которого не следует,
+    # что делать дальше. `apply_lines` про то же говорит прямо, и чтение
+    # должно вести себя так же — иначе агент чинит не ту беду.
+    if last < first:
+        return f"Конец раньше начала: запрошены строки {first}-{last}."
 
     width = len(str(last))
     body = "\n".join(f"{n:>{width}}| {lines[n - 1]}" for n in range(first, last + 1))

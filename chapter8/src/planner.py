@@ -749,7 +749,10 @@ def split_target(target: str) -> tuple[str, str]:
     вслепую нельзя: у пути `C:\\work\\a.py` двоеточие своё.
     """
     text = target.strip()
-    if not text or " " not in text.rstrip(":") and ":" not in text.rstrip(":"):
+    # Скобки не для красоты: без них `or` и `and` читаются не в том
+    # порядке, в каком написаны, и условие работает правильно случайно.
+    bare = text.rstrip(":")
+    if not text or (" " not in bare and ":" not in bare):
         return text, ""
 
     head = text.split()[0].rstrip(":,;")

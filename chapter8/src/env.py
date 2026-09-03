@@ -122,7 +122,11 @@ def local_modules() -> set[str]:
     names = set()
     for path in root.glob("*.py"):
         names.add(path.stem)
-    for path in root.glob("*/__init__.py"):
+    # Каталог с любым .py внутри — тоже свой пакет, даже без
+    # `__init__.py`. Пространства имён (PEP 420) импортируются точно
+    # так же, и `import pkg.sub` из такого каталога отправлял агента
+    # искать в сети пакет `pkg`, которого там нет и быть не должно.
+    for path in root.glob("*/*.py"):
         names.add(path.parent.name)
     return names
 

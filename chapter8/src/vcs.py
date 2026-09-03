@@ -148,7 +148,10 @@ def git_branch(name: str = "") -> str:
     # Имя ветки уезжает в командную строку, поэтому проверяется до того,
     # а не «git разберётся». Пробел или дефис в начале превращают имя
     # в ключ команды — самый простой способ попросить git не о том.
-    if branch.startswith("-") or any(ch in branch for ch in " ~^:?*[\\"):
+    if (branch.startswith(("-", "."))
+            or branch.endswith((".", ".lock"))
+            or ".." in branch
+            or any(ch in branch for ch in " ~^:?*[\\")):
         return f"Недопустимое имя ветки: {branch!r}"
 
     verdict = guard.check(f"создать ветку {branch}", f"из текущей: {current_branch()}")

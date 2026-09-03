@@ -314,23 +314,27 @@ def run_python(path: str) -> str:
         return str(exc)
     if not target.is_file():
         return f"Нет такого файла: {guard.relative(target)}"
-    return _guarded_run(f"python {guard.relative(target)}", ask=True)
+    return _guarded_run([interpreter(), guard.relative(target)], ask=True)
 
 
 @tool
 def run_tests(target: str = "") -> str:
     """Прогоняет pytest и возвращает итог вместе с первой ошибкой."""
-    where = ""
+    where: list[str] = []
     if target.strip():
         try:
-            where = " " + guard.relative(guard.resolve_path(target))
+            where = [guard.relative(guard.resolve_path(target))]
         except guard.OutsideWorkspace as exc:
             return str(exc)
 
     # -q убирает шапку и точки, --no-header — заголовок с версиями:
     # это десятки строк, которые модели не говорят ничего, а место
     # в контексте занимают.
-    run = execute(f"python -m pytest{where} -q --no-header", timeout=max(guard.get_policy().timeout, 120.0))
+    # Команда СПИСКОМ, а не строкой: путь с пробелом в строке
+    # разъезжается на два аргумента, и pytest идёт искать несуществующее.
+    # Каталог «E:\мои проекты\app» — не экзотика, а Windows по умолчанию.
+    command = [interpreter(), "-m", "pytest", *where, "-q", "--no-header"]
+    run = execute(command, timeout=max(guard.get_policy().timeout, 120.0))
     if run.timed_out:
         return run.summary()
 

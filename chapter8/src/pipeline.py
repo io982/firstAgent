@@ -675,9 +675,15 @@ def _ask_file(system: str, user: str, schema: dict) -> tuple[dict | str, str]:
     try:
         with using_model(coder_model()), _patience(WRITE_TIMEOUT):
             raw = request_model(messages, response_format=schema, options={"num_predict": WRITE_MAX_TOKENS})
-        return json.loads(raw), ""
+        answer = json.loads(raw)
     except Exception as exc:  # noqa: BLE001
         return {}, str(exc)
+    # Схема требует объект, но проверка стоит всё равно: разбор JSON
+    # возвращает и список, и строку, а вызывающий сразу зовёт `.get()`
+    # и падает уже вне обработчика — там, где беду никто не ловит.
+    if not isinstance(answer, dict):
+        return {}, f"ответ не объект, а {type(answer).__name__}"
+    return answer, ""
 
 
 def _task_block(step, state: State, path: str, problem: str) -> str:
@@ -1119,7 +1125,14 @@ def node_verify(state: State) -> State:
             run = execute([interpreter(), "-c", f"import {module}"], timeout=limit)
             state.extra["verified_by"] = f"импорт {entry} (программа ждёт ввода, запускать её нечем)"
         else:
-            run = execute(f"python {entry}", timeout=limit)
+            # Запуск здесь идёт БЕЗ guard.check, и это правило, а не
+            # недосмотр. Спрашивать нечего: человек подтвердил план,
+            # в котором стоит шаг проверки, и подтвердил каждую запись
+            # в файл, который сейчас запускается. Второй вопрос про то
+            # же самое — не защита, а приучение жать «y» не читая.
+            # То же исключение и по той же причине сделано у `run_tests`
+            # и `run_lint`, и там оно записано в shell.py.
+            run = execute([interpreter(), entry], timeout=limit)
             state.extra["verified_by"] = f"запуск {entry}"
         green = run.ok
 

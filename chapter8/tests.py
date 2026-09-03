@@ -90,7 +90,15 @@ from chapter8.src.planner import (
     split_target,
     validate_plan,
 )
-from chapter8.src.shell import RUN_TOOLS, Run, clip, execute, first_error, suite_passed
+from chapter8.src.shell import (
+    RUN_TOOLS,
+    Run,
+    clip,
+    execute,
+    first_error,
+    interpreter,
+    suite_passed,
+)
 from chapter8.src.vcs import GIT_TOOLS, current_branch, git_commit, git_diff, git_log, git_status
 
 GIT = shutil.which("git")
@@ -795,6 +803,19 @@ class TestReadTools:
 
     def test_запрошена_строка_за_концом_файла(self, sample):
         assert "всего 5 строк" in read_lines("sample.py", "99")
+
+    def test_конец_раньше_начала_это_сказано(self, sample):
+        """Прежде такой запрос отвечал заголовком «3-1» и пустотой.
+
+        Молчаливый бессмысленный ответ хуже отказа: из него не следует,
+        что делать дальше, и модель чинит не ту беду. `apply_lines`
+        про то же говорит прямо, и чтение обязано вести себя так же.
+        """
+        answer = read_lines("sample.py", "3", "1")
+        assert "Конец раньше начала" in answer
+
+    def test_обычный_диапазон_читается(self, sample):
+        assert "1|" in read_lines("sample.py", "1", "2")
 
     def test_чтение_несуществующего(self, workspace):
         assert "Нет такого файла" in read_lines("missing.py")
@@ -2348,7 +2369,7 @@ class TestVerifyModes:
         state = started(Plan("з", []), touched=["app.py"])
         pipeline.node_verify(state)
         assert state.extra["verified_by"] == "запуск app.py"
-        assert "python app.py" in seen[0]
+        assert seen[0] == [interpreter(), "app.py"], "путь отдельным аргументом: в нём бывает пробел"
         assert state.extra["tests_green"]
 
     def test_проверять_нечем(self, workspace):
@@ -2439,7 +2460,7 @@ class TestInteractiveProgram:
         pipeline.node_verify(state)
 
         assert state.extra["verified_by"] == "запуск app.py"
-        assert "python app.py" in seen[0]
+        assert seen[0] == [interpreter(), "app.py"], "путь отдельным аргументом: в нём бывает пробел"
 
     def test_дочернему_процессу_не_отдаётся_наш_терминал(self, workspace):
         """Иначе программа агента заберёт ввод себе, и агент повиснет."""
@@ -3228,6 +3249,37 @@ class TestAgentEntry:
     def test_показать_важнее_чем_сделать(self, ):
         """«Покажи diff» начинается с глагола, но задачей не является."""
         assert not agent8.looks_like_task("покажи изменения")
+
+    @pytest.mark.parametrize("task", [
+        "поправь функцию там, где вычисляется сумма",
+        "исправь место, где падает тест",
+        "добавь проверку туда, где ввод",
+        "почини то, где считается скидка",
+    ])
+    def test_слово_где_внутри_задачи_её_не_отменяет(self, task):
+        """Самая обычная форма просьбы о правке, и она уезжала в ответ текстом.
+
+        Вопросные слова ищутся только в НАЧАЛЕ реплики. Пока проверка
+        шла вхождением куда угодно, «где» ловилось в середине задачи —
+        и агент отвечал текстом вместо того, чтобы править файл. Ошибка
+        того же рода, что уже описана у TASK_MARKERS: реплику определяет
+        её главный глагол, а он стоит первым.
+        """
+        assert agent8.looks_like_task(task)
+
+    @pytest.mark.parametrize("question", [
+        "где реализован калькулятор?",
+        "покажи git log",
+        "что изменилось в calc.py",
+        "как устроен реестр инструментов",
+        "объясни, что делает guard",
+    ])
+    def test_вопрос_в_начале_остаётся_вопросом(self, question):
+        assert not agent8.looks_like_task(question)
+
+    def test_опечатка_человека_ловится(self):
+        """«испарвь» стоит в маркерах намеренно: цена промаха несимметрична."""
+        assert agent8.looks_like_task("испарвь сложение в calc.py")
 
 
 class TestHandle:
@@ -4249,6 +4301,61 @@ class TestWriteMode:
         assert report, "замер не собрал ни одной строки"
 
 
+def dependency_closure(roots):
+    """Все пакеты, которые тянут за собой названные, — по метаданным.
+
+    Список руками здесь был ошибкой, и не потому, что в нём нашлась
+    опечатка (её как раз не нашлось), а потому, что найти её было бы
+    нечем: замер печатает «пакетов установлено: X из N ожидаемых»,
+    и при опечатке в имени X молча уменьшается — замер продолжает
+    работать и врать. Число, ради которого он написан, обязано браться
+    оттуда же, откуда его берёт pip.
+
+    Условия учитываются: `httpx2` нужен langsmith всегда, а `pytest` —
+    только с extra `pytest`. Пустое окружение в `evaluate()` означает
+    «нужен всегда», и необязательное отсекается само.
+    """
+    import importlib.metadata as md
+
+    from packaging.requirements import Requirement
+
+    seen: set[str] = set()
+    queue = [str(name) for name in roots]
+    while queue:
+        name = queue.pop().lower().replace("_", "-")
+        if name in seen:
+            continue
+        try:
+            dist = md.distribution(name)
+        except md.PackageNotFoundError:
+            continue
+        seen.add(name)
+        for line in dist.requires or []:
+            requirement = Requirement(line)
+            if requirement.marker is not None and not requirement.marker.evaluate():
+                continue
+            queue.append(requirement.name)
+    return seen
+
+
+def disk_size(names):
+    """Сколько места занимают названные пакеты, в байтах."""
+    import importlib.metadata as md
+
+    total = 0
+    for name in names:
+        try:
+            dist = md.distribution(name)
+        except md.PackageNotFoundError:
+            continue
+        for file in dist.files or []:
+            try:
+                total += dist.locate_file(file).stat().st_size
+            except OSError:
+                pass
+    return total
+
+
 @pytest.mark.slow
 @needs_langgraph
 class TestLangGraphCost:
@@ -4257,37 +4364,29 @@ class TestLangGraphCost:
     Здесь нет модели и нет случайности, поэтому замер быстрый — но
     метка `slow` стоит по другой причине: он лезет в метаданные
     установленных пакетов и на чужой машине даст другие числа.
+
+    Считается не «сколько пакетов у langgraph», а сколько их СВЕРХ
+    того, что курс ставит и так. Общее число было бы нечестным
+    в обе стороны: pydantic и requests в нём уже есть, а вот
+    langsmith со своим http-клиентом — нет.
     """
 
-    PACKAGES = (
-        "langgraph", "langgraph-checkpoint", "langgraph-prebuilt", "langgraph-sdk",
-        "langchain-core", "langchain-protocol", "langsmith", "httpx2", "httpcore2",
-        "ormsgpack", "xxhash", "uuid_utils", "zstandard", "websockets", "truststore",
-        "jsonpatch", "jsonpointer", "requests-toolbelt", "sniffio", "distro",
-    )
+    # Корни, от которых считается «курс и так это ставит». Из
+    # requirements.txt, кроме самой langgraph: она и есть предмет замера.
+    COURSE_ROOTS = ("requests", "pytest", "pytest-timeout", "chromadb", "snowballstemmer")
 
     def test_цена_зависимости(self):
-        import importlib.metadata as md
-
-        found, total = 0, 0
-        for name in self.PACKAGES:
-            try:
-                dist = md.distribution(name)
-            except md.PackageNotFoundError:
-                continue
-            found += 1
-            for file in dist.files or []:
-                try:
-                    total += dist.locate_file(file).stat().st_size
-                except OSError:
-                    pass
+        added = dependency_closure(["langgraph"]) - dependency_closure(self.COURSE_ROOTS)
+        if not added:
+            pytest.skip("langgraph не установлена — считать нечего")
 
         own = len(Path("chapter7/src/graph.py").read_text(encoding="utf-8").splitlines())
         adapter = len(Path("chapter8/src/pipeline_lg.py").read_text(encoding="utf-8").splitlines())
 
         print("\n\nЗАМЕР 4: цена LangGraph")
-        print(f"Пакетов установлено: {found} из {len(self.PACKAGES)} ожидаемых")
-        print(f"На диске: {total / 1024 / 1024:.1f} МБ")
+        print(f"Пакетов сверх тех, что курс ставит и так: {len(added)}")
+        print(f"   {', '.join(sorted(added))}")
+        print(f"На диске: {disk_size(added) / 1024 / 1024:.1f} МБ")
         print(f"Свой граф (chapter7/src/graph.py): {own} строк, зависимостей 0")
         print(f"Переходник на LangGraph (pipeline_lg.py): {adapter} строк")
 
@@ -4299,4 +4398,4 @@ class TestLangGraphCost:
         build_pipeline()
         print(f"Сборка своего графа: {time.monotonic() - started_at:.4f} с")
 
-        assert found > 0
+        assert "langgraph" in added, "предмет замера обязан попасть в счёт"
