@@ -362,7 +362,40 @@ def run_lint(path: str = ".") -> str:
 
 
 def undefined_names(path: str) -> list[str]:
-    """Имена, которые файл использует, но нигде не определяет.
+    """Имена, которые файл на диске использует, но нигде не определяет."""
+    if not path.endswith(".py"):
+        return []
+    try:
+        where = guard.relative(guard.resolve_path(path))
+    except guard.OutsideWorkspace:
+        return []
+    return _ruff_undefined([interpreter(), "-m", "ruff", "check", "--select", "F821",
+                            "--no-cache", "--output-format", "concise", where])
+
+
+def undefined_in_text(name: str, text: str) -> list[str]:
+    """То же, но для текста, которого ещё нет на диске.
+
+    Нужно, чтобы ловить неопределённое имя ПРИ ЗАПИСИ, а не после
+    прогона. Живой прогон: правка вписала `print(2*a*x + b)` в функцию
+    `solve_quadratic(a, b, c)`, где никакого `x` нет. Поймалось это
+    только запуском в конце плана — то есть после двух кругов починки
+    и отката всей работы. А знал об этом линтер с самого начала.
+
+    Текст уходит линтеру через стандартный ввод: на диск писать нечего,
+    правка ещё не подтверждена человеком.
+    """
+    if not name.endswith(".py") or not text.strip():
+        return []
+    return _ruff_undefined(
+        [interpreter(), "-m", "ruff", "check", "--select", "F821", "--no-cache",
+         "--output-format", "concise", "--stdin-filename", name, "-"],
+        feed=text,
+    )
+
+
+def _ruff_undefined(command: list[str], feed: str = "") -> list[str]:
+    """Разбирает ответ линтера в список имён.
 
     Спрашивается у ruff (правило F821), а не считается самим: разобрать
     области видимости Python правильно — работа линтера, и делать её
@@ -372,24 +405,16 @@ def undefined_names(path: str) -> list[str]:
     она делает агента строже там, где линтер есть, и не ломает главу
     там, где его нет.
     """
-    if not path.endswith(".py"):
-        return []
-    try:
-        where = guard.relative(guard.resolve_path(path))
-    except guard.OutsideWorkspace:
-        return []
-
-    run = execute([interpreter(), "-m", "ruff", "check", "--select", "F821",
-                   "--no-cache", "--output-format", "concise", where], timeout=60.0)
+    run = execute(command, timeout=60.0, feed=feed)
     if run.code == 127 or "No module named" in run.text():
         return []
 
     names = []
     for line in run.text().splitlines():
         if "F821" in line and "`" in line:
-            name = line.split("`")[1]
-            if name not in names:
-                names.append(name)
+            found = line.split("`")[1]
+            if found not in names:
+                names.append(found)
     return names
 
 

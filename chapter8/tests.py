@@ -104,6 +104,7 @@ from chapter8.src.shell import (
     first_error,
     interpreter,
     suite_passed,
+    undefined_in_text,
     undefined_names,
 )
 from chapter8.src.vcs import GIT_TOOLS, current_branch, git_commit, git_diff, git_log, git_status
@@ -2536,6 +2537,44 @@ class TestImportsOnTop:
         answer = append_to_file("app.py", "print('конец')\n")
         assert "в конец файла" in answer
         assert (workspace / "app.py").read_text(encoding="utf-8").rstrip().endswith("print('конец')")
+
+
+class TestUndefinedOnWrite:
+    """Неопределённое имя ловится ПРИ ЗАПИСИ, а не после прогона.
+
+    Живой прогон: правка вписала `print(2*a*x + b)` в функцию
+    `solve_quadratic(a, b, c)`, где никакого `x` нет. Поймалось это
+    запуском в конце плана — то есть после двух кругов починки
+    и отката всей работы. А линтер знал об этом сразу.
+    """
+
+    BEFORE = ("def solve(a, b, c):" + chr(10) +
+              "    return a + b + c" + chr(10))
+
+    def test_чужое_имя_отменяет_правку(self, workspace):
+        (workspace / "app.py").write_text(self.BEFORE, encoding="utf-8")
+        answer = replace_lines("app.py", "2", "2", "    return 2*a*x + b")
+        assert "нигде не определены" in answer
+        assert "x" in answer
+        assert (workspace / "app.py").read_text(encoding="utf-8") == self.BEFORE
+
+    def test_свои_имена_правку_не_отменяют(self, workspace):
+        (workspace / "app.py").write_text(self.BEFORE, encoding="utf-8")
+        replace_lines("app.py", "2", "2", "    return 2*a*c + b")
+        assert "2*a*c + b" in (workspace / "app.py").read_text(encoding="utf-8")
+
+    def test_чужое_прошлое_чинить_не_мешают(self, workspace):
+        """Файл мог приехать к нам уже сломанным — это и надо чинить."""
+        broken = "def solve(a):" + chr(10) + "    return a + missing_name" + chr(10)
+        (workspace / "app.py").write_text(broken, encoding="utf-8")
+        answer = append_to_file("app.py", "x = 1" + chr(10))
+        assert "нигде не определены" not in answer
+
+    def test_имя_по_тексту_без_записи_на_диск(self, workspace):
+        """Правка ещё не подтверждена человеком — на диск писать нечего."""
+        text = "def f(a):" + chr(10) + "    return a + unknown_here" + chr(10)
+        assert undefined_in_text("app.py", text) == ["unknown_here"]
+        assert not (workspace / "app.py").exists()
 
 
 class TestUnreachable:
