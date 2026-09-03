@@ -55,6 +55,7 @@ from chapter8.src.edits import (
     lost_definitions,
     missing_fields,
     same_code,
+    same_tree,
     stray_definitions,
     syntax_ok,
     unified,
@@ -2491,6 +2492,126 @@ class TestStrayDefinitions:
         assert (workspace / "app.py").read_text(encoding="utf-8") == before
 
 
+class TestImportsOnTop:
+    """Импорт, дописанный в конец файла, бесполезен — его место наверху.
+
+    Живой прогон показал это дословно. Человек принёс traceback «name
+    'math' is not defined», модель ответила `import math` — и он приехал
+    ПОСЛЕ блока `if __name__`, то есть выполнился уже после вызова,
+    который падал. Файл разбирается, ошибка на месте, а человеку
+    пришлось чинить руками.
+    """
+
+    APP = (
+        "def solve(a):\n"
+        "    return math.sqrt(a)\n"
+        "\n\n"
+        "if __name__ == '__main__':\n"
+        "    print(solve(4))\n"
+    )
+
+    def test_импорт_уходит_в_начало(self, workspace):
+        (workspace / "app.py").write_text(self.APP, encoding="utf-8")
+        answer = append_to_file("app.py", "import math\n")
+        assert "в начало файла" in answer
+        written = (workspace / "app.py").read_text(encoding="utf-8")
+        assert written.startswith("import math")
+
+    def test_докстринг_модуля_остаётся_первым(self, workspace):
+        (workspace / "app.py").write_text('"""модуль"""\nimport os\n\n\nx = os\n', encoding="utf-8")
+        append_to_file("app.py", "import math\n")
+        written = (workspace / "app.py").read_text(encoding="utf-8")
+        assert written.startswith('"""модуль"""')
+        assert written.splitlines()[1:3] == ["import os", "import math"]
+
+    def test_не_импорт_дописывается_как_прежде(self, workspace):
+        (workspace / "app.py").write_text(self.APP, encoding="utf-8")
+        answer = append_to_file("app.py", "print('конец')\n")
+        assert "в конец файла" in answer
+        assert (workspace / "app.py").read_text(encoding="utf-8").rstrip().endswith("print('конец')")
+
+
+class TestSameTree:
+    """Комментарий не меняет поведения программы — значит, не чинит её."""
+
+    def test_комментарий_дерево_не_меняет(self):
+        before = "x = 1\n"
+        assert same_tree("a.py", before, before + "# пояснение\n")
+
+    def test_настоящая_правка_меняет(self):
+        assert not same_tree("a.py", "x = 1\n", "x = 2\n")
+
+    def test_не_python_сравнивать_нечем(self):
+        assert not same_tree("run.bat", "echo 1\n", "echo 1\nrem пояснение\n")
+
+    def test_сломанный_файл_считается_другим(self):
+        assert not same_tree("a.py", "x = 1\n", "x = (\n")
+
+
+class TestErrorWithoutText:
+    """«Исправь ошибку» без текста ошибки: агент идёт и смотрит сам.
+
+    Раньше он правил наугад — живой прогон дал `# Дополнительные
+    комментарии`, дописанные в конец файла. Модель и не могла ответить
+    иначе: текста ошибки в запросе не было. А узнать его можно —
+    программа лежит на диске, запускать её мы умеем.
+    """
+
+    @pytest.mark.parametrize("task", [
+        "исправь ошибку в нашем приложении",
+        "приложение падает",
+        "не работает вывод корней",
+    ])
+    def test_просят_починить_не_говоря_что(self, task):
+        assert pipeline.asks_about_error(task)
+
+    @pytest.mark.parametrize("task", [
+        "исправь ошибку: Traceback (most recent call last): File app.py, line 4",
+        "добавь функцию деления",
+        "напиши приложение hello world",
+    ])
+    def test_текст_ошибки_принесли_или_её_нет(self, task):
+        assert not pipeline.asks_about_error(task)
+
+    def test_ошибка_запуска_попадает_в_запрос(self, workspace, monkeypatch):
+        (workspace / "app.py").write_text("print(math.pi)\n", encoding="utf-8")
+        monkeypatch.setattr(pipeline, "execute", lambda c, timeout=None, feed="": Run(
+            str(c), 1, "", "NameError: name 'math' is not defined", 0.1))
+        model = fake_model([anchor_answer("app.py", "print(math.pi)", "import math\nprint(math.pi)")])
+        monkeypatch.setattr(pipeline, "request_model", model)
+
+        state = started(Plan("исправь ошибку в приложении",
+                             [Step("edit", "app.py", "")]))
+        pipeline.node_step(state)
+
+        asked = model.seen[0][-1]["content"]
+        assert "NameError" in asked, "модель должна увидеть настоящую ошибку"
+
+    def test_рабочая_программа_ошибки_не_придумывает(self, workspace, monkeypatch):
+        (workspace / "app.py").write_text("print(1)\n", encoding="utf-8")
+        monkeypatch.setattr(pipeline, "execute", fake_run(green=True))
+        state = started(Plan("исправь ошибку в приложении", []))
+        assert pipeline._seen_error(state, "app.py") == ""
+
+    def test_комментарий_вместо_починки_не_засчитывается(self, workspace, monkeypatch):
+        """Текст файла изменился, дерево — нет, ошибка на месте."""
+        (workspace / "app.py").write_text("print(math.pi)\n", encoding="utf-8")
+        monkeypatch.setattr(pipeline, "execute", lambda c, timeout=None, feed="": Run(
+            str(c), 1, "", "NameError: name 'math' is not defined", 0.1))
+        model = fake_model([
+            anchor_answer("app.py", "", "# просто комментарий"),
+            anchor_answer("app.py", "print(math.pi)", "import math\nprint(math.pi)"),
+        ])
+        monkeypatch.setattr(pipeline, "request_model", model)
+
+        state = started(Plan("исправь ошибку в приложении", [Step("edit", "app.py", "")]))
+        pipeline.node_step(state)
+
+        assert len(model.seen) == 2, "первая правка не засчитана — спросили ещё раз"
+        assert "только комментарий" in model.seen[1][-1]["content"]
+        assert "import math" in (workspace / "app.py").read_text(encoding="utf-8")
+
+
 class TestSameCode:
     """Отличать правку от её видимости — и не спутать с настоящей правкой отступа."""
 
@@ -2750,16 +2871,46 @@ class TestUndefinedNames:
         assert state.extra["tests_green"] is False
         assert "derivative" in state.extra["failure"]
 
-    def test_у_запущенной_программы_линтер_не_спрашивается(self, workspace, monkeypatch):
-        """Запуск — проверка сильнее линтера, и второй раз спрашивать нечего."""
-        (workspace / "app.py").write_text("print(1)\n", encoding="utf-8")
+    def test_линтер_спрашивается_и_у_запущенной(self, workspace, monkeypatch):
+        """Запуск проходит ОДНОЙ веткой, а имя не определено во всём файле.
+
+        Живой прогон: `math.sqrt` без `import math`, подставленные
+        числа дали отрицательный дискриминант, ветка с корнями
+        не выполнилась — запуск зелёный, программа падает на первом же
+        уравнении с корнями. Линтер видел это с самого начала, а его
+        не спрашивали: «запуск сильнее линтера» оказалось неверным.
+        """
+        (workspace / "app.py").write_text("print(1)" + chr(10), encoding="utf-8")
         monkeypatch.setattr(pipeline, "execute", fake_run(green=True))
-        asked = []
-        monkeypatch.setattr(pipeline, "undefined_names", lambda p: asked.append(p) or ["x"])
+        monkeypatch.setattr(pipeline, "undefined_names", lambda p: ["math"])
         state = started(Plan("з", []), touched=["app.py"])
         pipeline.node_verify(state)
-        assert asked == []
-        assert state.extra["tests_green"]
+
+        assert state.extra["tests_green"] is False
+        assert "math" in state.extra["failure"]
+
+    def test_запуск_идёт_несколькими_наборами_ввода(self, workspace, monkeypatch):
+        """Один набор проходит одной веткой, беда в соседней остаётся невидимой."""
+        (workspace / "app.py").write_text("print(input())" + chr(10), encoding="utf-8")
+        feeds = []
+        monkeypatch.setattr(pipeline, "execute",
+                            lambda c, timeout=None, feed="": feeds.append(feed) or Run(str(c), 0, "", "", 0.1))
+        monkeypatch.setattr(pipeline, "undefined_names", lambda p: [])
+        state = started(Plan("з", []), touched=["app.py"])
+        pipeline.node_verify(state)
+
+        assert feeds == list(pipeline.SCRIPTED_INPUTS)
+
+    def test_первый_же_провал_прекращает_запуски(self, workspace, monkeypatch):
+        (workspace / "app.py").write_text("print(input())" + chr(10), encoding="utf-8")
+        feeds = []
+        monkeypatch.setattr(pipeline, "execute",
+                            lambda c, timeout=None, feed="": feeds.append(feed) or Run(str(c), 1, "", "ZeroDivisionError", 0.1))
+        state = started(Plan("з", []), touched=["app.py"])
+        pipeline.node_verify(state)
+
+        assert len(feeds) == 1, "сломано — дальше проверять нечего"
+        assert state.extra["tests_green"] is False
 
 
 class TestVerifyModes:

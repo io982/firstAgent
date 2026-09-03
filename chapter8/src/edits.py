@@ -309,6 +309,23 @@ def apply_append(text: str, content: str) -> EditResult:
             head += eol
 
     note = ""
+    # Импорт, дописанный в КОНЕЦ файла, бесполезен, и живой прогон
+    # показал это дословно. Человек принёс traceback «name 'math'
+    # is not defined», модель ответила `import math` — и он приехал
+    # после блока `if __name__`, то есть выполнился уже ПОСЛЕ вызова,
+    # который падал. Файл разбирается, ошибка на месте, а человеку
+    # пришлось чинить руками.
+    #
+    # Импортам место наверху, и переставить их туда — работа кода:
+    # места для импорта в Python ровно одно, и выводить его не из чего.
+    if _only_imports(plain):
+        return EditResult(
+            True,
+            f"Импорт добавлен в начало файла ({len(plain.splitlines())} строк).",
+            _with_imports_on_top(text, plain, eol),
+            APPEND,
+        )
+
     # Определение, уехавшее внутрь чужого блока, — это сбитый отступ,
     # и чинится он механически. Живой прогон: на «добавь производную»
     # модель раз за разом отвечала телом с четырьмя пробелами, и `def`
@@ -327,6 +344,47 @@ def apply_append(text: str, content: str) -> EditResult:
 
     added = len(body.strip().splitlines())
     return EditResult(True, f"Дописано в конец файла ({added} строк).{note}", head + body, APPEND)
+
+
+def _only_imports(content: str) -> bool:
+    """Состоит ли дописываемое ТОЛЬКО из импортов."""
+    try:
+        tree = ast.parse(content)
+    except (SyntaxError, ValueError):
+        return False
+    return bool(tree.body) and all(
+        isinstance(node, (ast.Import, ast.ImportFrom)) for node in tree.body
+    )
+
+
+def _with_imports_on_top(text: str, imports: str, eol: str) -> str:
+    """Вставляет импорты после докстринга модуля и уже существующих импортов.
+
+    Не в самое начало: докстринг модуля обязан остаться первым, иначе
+    он перестанет быть докстрингом. И не перед чужими импортами —
+    рядом с ними, чтобы файл читался как обычный питоновский файл.
+    """
+    lines = text.splitlines(keepends=True)
+    body = imports.replace("\n", eol) + eol
+    try:
+        tree = ast.parse(text)
+    except (SyntaxError, ValueError):
+        return text + eol + body
+
+    where = 0
+    for node in tree.body:
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            where = node.end_lineno
+        elif isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant) and where == 0:
+            where = node.end_lineno       # докстринг модуля
+        else:
+            break
+
+    if where and not lines[where - 1].endswith(("\n", "\r")):
+        body = eol + body
+    if not where:
+        body += eol
+    return "".join(lines[:where]) + body + "".join(lines[where:])
 
 
 def syntax_ok(path: str, text: str) -> tuple[bool, str]:
@@ -400,6 +458,29 @@ def filled_bodies(path: str, text: str) -> list[str]:
             filled.append(node.name)
             break
     return filled
+
+
+def same_tree(path: str, before: str, after: str) -> bool:
+    """Одинаковы ли два файла для интерпретатора: сравнение по дереву разбора.
+
+    Сильнее, чем `same_code`: та не считает разницей пустые строки
+    и хвостовые пробелы, а эта — ещё и комментарии, потому что
+    комментарий не меняет поведения программы.
+
+    Нужно там, где просили ПОЧИНИТЬ. Живой прогон: на «исправь ошибку
+    в нашем приложении» модель дописала `# Дополнительные комментарии`
+    и вернула это как правку. Текст файла изменился, дерево — нет,
+    ошибка осталась на месте.
+
+    Для не-Python и для файла, который не разбирается, ответ «разные»:
+    сравнивать нечем, а объявлять правку пустой без основания нельзя.
+    """
+    if not path.endswith(".py"):
+        return False
+    try:
+        return ast.dump(ast.parse(before)) == ast.dump(ast.parse(after))
+    except (SyntaxError, ValueError):
+        return False
 
 
 def stray_definitions(path: str, before: str, after: str) -> list[str]:

@@ -64,6 +64,7 @@ from contextlib import contextmanager
 
 import chapter1.agent as base
 from chapter1.agent import request_model
+from chapter5.agent import matches
 from chapter7.src.graph import END, Graph, State
 from chapter7.src.models import using_model
 from chapter8.src import codemap, env, guard, review
@@ -81,6 +82,7 @@ from chapter8.src.edits import (
     lost_definitions,
     missing_fields,
     same_code,
+    same_tree,
     syntax_ok,
     top_definitions,
     without_docstring,
@@ -191,6 +193,21 @@ WRITE_MAX_TOKENS = 1500
 # EOFError — и это НАША беда, а не её, поэтому такой ответ не считается
 # провалом (см. node_verify).
 SCRIPTED_INPUT = "1\n2\n3\n1\n2\n3\n" + "\n" * 6
+
+# Наборов НЕСКОЛЬКО, и это не запас, а необходимость. Один запуск
+# проходит одной веткой, и беда в соседней остаётся невидимой. Живой
+# прогон: приложение считало корни через `math.sqrt` без `import math`,
+# набор «1 2 3» дал отрицательный дискриминант, ветка с корнями
+# не выполнилась — и агент отчитался «Готово» о программе, которая
+# падает на первом же уравнении с корнями.
+#
+# Наборы подобраны под то, что консольные программы обычно спрашивают:
+# коэффициенты уравнения с разным числом корней.
+SCRIPTED_INPUTS = (
+    SCRIPTED_INPUT,
+    "1\n-3\n2\n1\n-3\n2\n" + "\n" * 6,   # два корня
+    "1\n2\n1\n1\n2\n1\n" + "\n" * 6,     # один корень
+)
 
 # Ошибка, которая означает «ввода не хватило», а не «программа сломана».
 INPUT_RAN_OUT = "EOFError"
@@ -966,6 +983,49 @@ def _remember(state: State, path: str) -> None:
     state.extra["path"] = path
 
 
+# Слова, которыми просят починить ошибку, не говоря какую.
+#
+# «Исправь ошибку в нашем приложении» — задача без единого указания,
+# ЧТО не так. Модель на такое отвечает чем угодно: живой прогон дал
+# `# Дополнительные комментарии`, дописанные в конец файла. Она и не
+# могла ответить иначе — текста ошибки в запросе не было.
+#
+# А узнать его можно: программа лежит на диске, запускать её мы умеем.
+ERROR_WORDS = ("ошибк", "падает", "не работает", "вылетает", "сломал", "баг", "traceback")
+
+# Признак, что человек ошибку УЖЕ принёс: тогда бегать за ней незачем.
+ERROR_BROUGHT = ("traceback", "error:", "exception", "line ")
+
+
+def asks_about_error(task: str) -> bool:
+    """Просят починить ошибку, но текста ошибки в задаче нет."""
+    lowered = f" {task.lower().strip()} "
+    if any(word in lowered for word in ERROR_BROUGHT):
+        return False
+    return matches(lowered, ERROR_WORDS)
+
+
+def _seen_error(state: State, path: str) -> str:
+    """Запускает программу и возвращает её ошибку — ту, о которой спрашивают.
+
+    Ради этого и сделан запуск с подставленным вводом. Человек, который
+    говорит «исправь ошибку в нашем приложении», не пересказывает
+    traceback — он ждёт, что агент увидит его сам. Раньше агент не видел
+    ничего и правил наугад; теперь он запускает программу и приносит
+    в запрос настоящую ошибку с номером строки.
+
+    Пусто, если программа не падает: тогда чинить нечего, и придумывать
+    поломку не надо.
+    """
+    entry = path if path.endswith(".py") else _entry_point(state)
+    if not entry:
+        return ""
+    run = _run_with_inputs(entry, max(guard.get_policy().timeout, 60.0))
+    if run.ok or INPUT_RAN_OUT in run.text():
+        return ""
+    return first_error(run.text())
+
+
 def _step_edit(step, state: State) -> tuple[bool, str]:
     """Правит существующий файл: читает, спрашивает модель, применяет.
 
@@ -980,6 +1040,14 @@ def _step_edit(step, state: State) -> tuple[bool, str]:
     if not path:
         return False, "нечего править: файл не назван"
 
+    # «Исправь ошибку» без текста ошибки — сходим и посмотрим сами.
+    # Найденное кладётся в состояние: его увидит и запрос правки,
+    # и цикл починки, если до него дойдёт.
+    seen = ""
+    if asks_about_error(state.user_input):
+        seen = state.extra.get("failure") or _seen_error(state, path)
+        state.extra["failure"] = seen
+
     state.retrieved = read_lines(path, "1", str(CONTEXT_LINES))
     state.extra["path"] = path
 
@@ -988,7 +1056,7 @@ def _step_edit(step, state: State) -> tuple[bool, str]:
     # тело. Форма, у которой нет способа промахнуться мимо места.
     place = state.extra.get("place")
     if place and place.get("path") == path:
-        problem = ""
+        problem = seen
         for _ in range(EDIT_ATTEMPTS):
             ok, result = _edit_function(state, place, step.detail, problem)
             if ok:
@@ -1000,7 +1068,7 @@ def _step_edit(step, state: State) -> tuple[bool, str]:
         # и тогда правка нужна не там, куда мы целились.
         state.extra.setdefault("log", []).append(f"правка функции не удалась: {problem}")
 
-    problem = ""
+    problem = seen
     forms: tuple[str, ...] | None = None
     for _ in range(EDIT_ATTEMPTS):
         was = _file_text(path)
@@ -1023,9 +1091,23 @@ def _step_edit(step, state: State) -> tuple[bool, str]:
         # считает изменение, а ошибка в файле остаётся. Такой ответ
         # засчитывать нельзя, иначе агент рапортует «Готово» о работе,
         # которой не было.
-        if same_code(was, _file_text(path)):
+        now = _file_text(path)
+        if same_code(was, now):
             problem = ("правка ничего не изменила в коде — вернулся тот же текст. "
                        "Найди в файле строку, которую задача просит поменять, и поменяй ЕЁ")
+            continue
+        # Комментарий — не починка. Просили исправить ошибку, а дерево
+        # разбора не изменилось: для интерпретатора файл прежний,
+        # и ошибка в нём прежняя. Живой прогон на «исправь ошибку
+        # в нашем приложении» дал ровно это — `# Дополнительные
+        # комментарии` в конце файла.
+        #
+        # Только для задач про ошибку: «добавь комментарии к функциям» —
+        # законная просьба, и запрещать её нельзя.
+        if asks_about_error(state.user_input) and same_tree(path, was, now):
+            problem = ("правка добавила только комментарий — для программы ничего "
+                       "не изменилось. Ошибка вот эта, почини именно её: "
+                       + state.extra.get("failure", "см. запуск"))
             continue
         _remember(state, path)
         return True, result
@@ -1340,13 +1422,6 @@ def node_verify(state: State) -> State:
             return state
 
         limit = max(guard.get_policy().timeout, 60.0)
-        # Признаком «программу и правда запускали» служит флаг, а не
-        # поиск слова в человеческом описании проверки. Первая версия
-        # спрашивала `"запуск" not in verified_by` — и молча ломалась
-        # о строку «программа ждёт ввода, ЗАПУСКАТЬ её нечем»: подстрока
-        # нашлась там, где смысл был обратный. Ровно та ошибка, о которой
-        # глава предупреждает в другом месте.
-        executed = False
         if _waits_for_input(entry) and not wants_scaffold(state.user_input):
             # Программу, ждущую ввода, ЗАПУСКАЕМ с подставленными
             # строками. Раньше её проверяли импортом или разбором,
@@ -1357,11 +1432,9 @@ def node_verify(state: State) -> State:
             # Ввод кончился (EOFError) — это НАША беда, а не программы:
             # мы дали меньше строк, чем она спросила. Такой ответ
             # проваливать нельзя, и ниже он разбирается отдельно.
-            run = execute([interpreter(), entry], timeout=limit, feed=SCRIPTED_INPUT)
-            executed = True
+            run = _run_with_inputs(entry, limit)
             state.extra["verified_by"] = f"запуск {entry} с подставленным вводом"
             if not run.ok and INPUT_RAN_OUT in run.text():
-                executed = False
                 run = execute([interpreter(), "-m", "py_compile", entry], timeout=limit)
                 state.extra["verified_by"] = (
                     f"разбор {entry} (подставленного ввода не хватило, запуск не досмотрен)"
@@ -1402,7 +1475,6 @@ def node_verify(state: State) -> State:
             # и `run_lint`, и там оно записано в shell.py.
             run = execute([interpreter(), entry], timeout=limit)
             state.extra["verified_by"] = f"запуск {entry}"
-            executed = True
         green = run.ok
 
         # Программу, которую нельзя запустить, мы проверили импортом
@@ -1417,7 +1489,14 @@ def node_verify(state: State) -> State:
         # разбор областей видимости — работа линтера, и писать второй
         # линтер в учебной главе значит писать его с ошибками. Нет
         # линтера — нет и проверки, глава от этого не ломается.
-        if green and not executed:
+        # Линтер спрашивается ВСЕГДА, а не только когда запустить
+        # не вышло. Первая версия его пропускала — «запуск сильнее
+        # линтера», — и это неверно: запуск проходит ОДНОЙ веткой,
+        # а неопределённое имя есть свойство файла целиком. Живой
+        # прогон: `math.sqrt` без `import math`, набор входных чисел
+        # дал отрицательный дискриминант, ветка не выполнилась, запуск
+        # зелёный. Линтер видел это с самого начала.
+        if green:
             unknown = undefined_names(entry)
             if unknown:
                 green = False
@@ -1513,6 +1592,21 @@ def asks_input_on_import(path: str) -> bool:
         if _asks_input(statement):
             return True
     return False
+
+
+def _run_with_inputs(entry: str, limit: float) -> Run:
+    """Запускает программу несколькими наборами ввода. Первый провал — ответ.
+
+    Несколькими, потому что один набор проходит одной веткой. Успех
+    всех наборов не доказывает, что программа верна, но провал любого
+    доказывает, что сломана, — а это ровно то, что нужно проверке.
+    """
+    last = None
+    for feed in SCRIPTED_INPUTS:
+        last = execute([interpreter(), entry], timeout=limit, feed=feed)
+        if not last.ok:
+            return last
+    return last
 
 
 def _test_files(state: State) -> list[str]:
