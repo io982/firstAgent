@@ -1424,10 +1424,14 @@ def node_verify(state: State) -> State:
         limit = max(guard.get_policy().timeout, 60.0)
         if _waits_for_input(entry) and not wants_scaffold(state.user_input):
             # Программу, ждущую ввода, ЗАПУСКАЕМ с подставленными
-            # строками. Раньше её проверяли импортом или разбором,
-            # и оба молчали про то, ради чего программу пишут: файл
-            # разбирается, импортируется — а запуск падает NameError
-            # или TypeError на первой же строке.
+            # строками. Раньше таких программ было два вида — с вводом
+            # под `if __name__` и с вводом на верхнем уровне модуля, —
+            # и проверялись они по-разному: первая импортом, вторая
+            # разбором. Оба ответа молчали про то, ради чего программу
+            # пишут: файл разбирается, импортируется — а запуск падает
+            # NameError или TypeError на первой же строке. Запуск
+            # с вводом сделал это различие ненужным: он одинаково
+            # выполняет оба вида и одинаково ловит обе беды.
             #
             # Ввод кончился (EOFError) — это НАША беда, а не программы:
             # мы дали меньше строк, чем она спросила. Такой ответ
@@ -1452,19 +1456,6 @@ def node_verify(state: State) -> State:
             # на единственный вопрос, который к каркасу имеет смысл.
             run = execute([interpreter(), "-m", "py_compile", entry], timeout=limit)
             state.extra["verified_by"] = f"разбор {entry} (просили каркас, выполнять в нём нечего)"
-        elif asks_input_on_import(entry):
-            # Ввод стоит на верхнем уровне модуля: импорт его ВЫПОЛНИТ
-            # и упадёт тем же EOFError, от которого импорт и должен был
-            # спасти. Живой прогон на этом откатил правильно написанное
-            # приложение. Остаётся разбор — он ничего не выполняет.
-            run = execute([interpreter(), "-m", "py_compile", entry], timeout=limit)
-            state.extra["verified_by"] = (
-                f"разбор {entry} (ввод спрашивается сразу при импорте, выполнять нечем)"
-            )
-        elif _waits_for_input(entry):
-            module = entry.rsplit("/", 1)[-1][: -len(".py")]
-            run = execute([interpreter(), "-c", f"import {module}"], timeout=limit)
-            state.extra["verified_by"] = f"импорт {entry} (программа ждёт ввода, запускать её нечем)"
         else:
             # Запуск здесь идёт БЕЗ guard.check, и это правило, а не
             # недосмотр. Спрашивать нечего: человек подтвердил план,
@@ -1543,14 +1534,6 @@ def _asks_input(node: ast.AST) -> bool:
     return False
 
 
-def _main_guard(node: ast.AST) -> bool:
-    """Это блок `if __name__ == "__main__":`?"""
-    if not isinstance(node, ast.If) or not isinstance(node.test, ast.Compare):
-        return False
-    left = node.test.left
-    return isinstance(left, ast.Name) and left.id == "__name__"
-
-
 def _module_tree(path: str) -> ast.Module | None:
     """Разбор файла или None, если он не читается и не разбирается."""
     try:
@@ -1563,35 +1546,6 @@ def _waits_for_input(path: str) -> bool:
     """Читает ли программа ввод с клавиатуры — где угодно в файле."""
     tree = _module_tree(path)
     return tree is not None and _asks_input(tree)
-
-
-def asks_input_on_import(path: str) -> bool:
-    """Спросит ли файл ввод ПРИ ИМПОРТЕ, а не только при запуске.
-
-    Разница стоила отката правильно написанного приложения, и вот она.
-    Проверка «программа ждёт ввода — значит импортируем» опирается
-    на молчаливое допущение, что интерактив лежит под `if __name__ ==
-    "__main__":`. Модель на 3B это допущение не разделяет: живой прогон
-    дал файл, где `input()` стоит прямо на верхнем уровне модуля.
-    Импорт такой модуль ВЫПОЛНЯЕТ — и падает тем же `EOFError`,
-    от которого импорт и должен был спасти.
-
-    Поэтому смотрим не «есть ли input», а «выполнится ли он при
-    импорте»: тела функций и классов при импорте не исполняются,
-    блок `__main__` при импорте не исполняется тоже, всё остальное —
-    исполняется.
-    """
-    tree = _module_tree(path)
-    if tree is None:
-        return False
-    for statement in tree.body:
-        if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            continue
-        if _main_guard(statement):
-            continue
-        if _asks_input(statement):
-            return True
-    return False
 
 
 def _run_with_inputs(entry: str, limit: float) -> Run:

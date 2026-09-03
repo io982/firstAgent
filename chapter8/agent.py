@@ -79,7 +79,7 @@ from chapter5.src import get_project_map, set_code_budget
 from chapter7.agent import history_budget, retrieval_budget
 from chapter7.src.agents import CODE_TOOLS, AgentSpec, Retrieval, Team
 from chapter7.src.graph import Graph, State
-from chapter8.src import guard
+from chapter8.src import codemap, guard
 from chapter8.src import planner as planner_module
 from chapter8.src.edits import describe_forms
 from chapter8.src.env import ENV_TOOLS, env_report
@@ -530,6 +530,10 @@ def handle(command: str, session: Session) -> str | None:
         if not os.path.isdir(path):
             return f"❌ Нет такого каталога: {path}"
         guard.set_workspace(path)
+        # Карта кода разобрана для ПРОШЛОГО каталога, а ключи в ней —
+        # относительные пути. Одноимённый файл в новом каталоге
+        # достал бы из кэша чужие определения.
+        codemap.forget_cache()
         session.memory.note_workspace()
         return workspace_report()
     if lowered in ("окружение", "env"):

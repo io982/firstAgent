@@ -2773,55 +2773,51 @@ class TestDepsNode:
         assert called == ["requests"]
 
 
-class TestInputAtImport:
-    """Ввод на верхнем уровне модуля против ввода под `if __name__`.
+class TestWaitsForInput:
+    """Ждёт ли программа ввода — и, значит, надо ли подставлять строки.
 
-    Разница стоила отката правильно написанного приложения. Проверка
-    «программа ждёт ввода — значит импортируем» опиралась на молчаливое
-    допущение, что интерактив лежит под `__main__`. Модель на 3B этого
-    допущения не разделяет: живой прогон дал файл, где `input()` стоит
-    прямо на верхнем уровне. Импорт такой модуль ВЫПОЛНЯЕТ и падает тем
-    же EOFError, от которого импорт и должен был спасти.
+    Раньше здесь была развилка потоньше: ввод под `if __name__`
+    проверялся импортом, ввод на верхнем уровне — разбором, потому что
+    импорт такой модуль ВЫПОЛНЯЕТ и падает тем же EOFError, от которого
+    импорт и должен был спасти. Запуск с подставленным вводом сделал
+    различие ненужным: он одинаково выполняет оба вида и одинаково
+    ловит обе беды. Развилка убрана, вопрос остался один.
     """
 
     GUARDED = (
-        "def solve(a):\n"
-        '    """корни"""\n'
-        "    return a\n"
-        "\n\n"
-        'if __name__ == "__main__":\n'
-        "    a = float(input('a: '))\n"
-        "    print(solve(a))\n"
+        "def solve(a):" + chr(10) +
+        '    """корни"""' + chr(10) +
+        "    return a" + chr(10) * 3 +
+        'if __name__ == "__main__":' + chr(10) +
+        "    a = float(input('a: '))" + chr(10) +
+        "    print(solve(a))" + chr(10)
     )
     BARE = (
-        "def solve(a):\n"
-        '    """корни"""\n'
-        "    return a\n"
-        "\n\n"
-        "print('программа о квадратных уравнениях')\n"
-        "a = float(input('a: '))\n"
-        "print(solve(a))\n"
+        "def solve(a):" + chr(10) +
+        '    """корни"""' + chr(10) +
+        "    return a" + chr(10) * 3 +
+        "a = float(input('a: '))" + chr(10) +
+        "print(solve(a))" + chr(10)
     )
 
-    def test_под_main_импорт_безопасен(self, workspace):
-        (workspace / "app.py").write_text(self.GUARDED, encoding="utf-8")
+    @pytest.mark.parametrize("source", ["GUARDED", "BARE"])
+    def test_ввод_виден_в_обоих_видах(self, workspace, source):
+        (workspace / "app.py").write_text(getattr(self, source), encoding="utf-8")
         assert pipeline._waits_for_input("app.py")
-        assert not pipeline.asks_input_on_import("app.py")
 
-    def test_на_верхнем_уровне_импорт_спросит(self, workspace):
-        (workspace / "app.py").write_text(self.BARE, encoding="utf-8")
-        assert pipeline._waits_for_input("app.py")
-        assert pipeline.asks_input_on_import("app.py")
-
-    def test_ввод_внутри_функции_при_импорте_молчит(self, workspace):
+    def test_ввод_внутри_функции_тоже_считается(self, workspace):
         (workspace / "app.py").write_text(
-            "def ask():\n    return input('a: ')\n", encoding="utf-8")
-        assert not pipeline.asks_input_on_import("app.py")
+            "def ask():" + chr(10) + "    return input('a: ')" + chr(10), encoding="utf-8")
+        assert pipeline._waits_for_input("app.py")
 
     def test_имя_переменной_вводом_не_считается(self, workspace):
-        (workspace / "app.py").write_text("user_input = 1\n", encoding="utf-8")
+        """`user_input` — это не вызов `input`, а слово, похожее на него."""
+        (workspace / "app.py").write_text("user_input = 1" + chr(10), encoding="utf-8")
         assert not pipeline._waits_for_input("app.py")
-        assert not pipeline.asks_input_on_import("app.py")
+
+    def test_сломанный_файл_вводом_не_считается(self, workspace):
+        (workspace / "app.py").write_text("def f(:" + chr(10), encoding="utf-8")
+        assert not pipeline._waits_for_input("app.py")
 
     def test_ввод_подставляется_и_программа_запускается(self, workspace, monkeypatch):
         """Запуск с подставленным вводом заменил и импорт, и разбор.
@@ -3965,10 +3961,10 @@ class TestCodeMap:
         os.utime(path, (time.time() + 1, time.time() + 1))
         assert "extra" in codemap.names()
 
-    def test_пустой_каталог_говорит_об_этом(self, workspace, monkeypatch):
+    def test_пустой_каталог_даёт_пустую_карту(self, workspace, monkeypatch):
         monkeypatch.setenv("AGENT_CODEMAP_FILE", str(workspace / "codemap.json"))
         codemap.forget_cache()
-        assert "нет ни одной функции" in codemap.render()
+        assert codemap.names() == []
 
 
 class TestPurposes:
@@ -4652,6 +4648,14 @@ class TestHandle:
         other = tmp_path_factory.mktemp("другой")
         handle(f"каталог {other}", session)
         assert guard.get_workspace() == other.resolve()
+
+    def test_смена_каталога_сбрасывает_карту(self, workspace, session, tmp_path_factory):
+        """Ключи карты — относительные пути, и в новом каталоге они чужие."""
+        (workspace / "app.py").write_text("def тут():" + chr(10) + "    return 1" + chr(10),
+                                          encoding="utf-8")
+        assert "тут" in codemap.names()
+        handle(f"каталог {tmp_path_factory.mktemp('другой')}", session)
+        assert codemap.names() == []
 
     def test_несуществующий_каталог_не_меняет_рабочий(self, workspace, session):
         assert "Нет такого каталога" in handle("каталог такогопутинету", session)
