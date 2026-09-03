@@ -125,12 +125,19 @@ def clean_policy():
 
 
 @pytest.fixture
-def workspace(tmp_path):
+def workspace(tmp_path, monkeypatch):
     """Пустой рабочий каталог с политикой «разрешать молча».
 
     AUTO, а не ASK: подтверждение читает stdin, а у тестов его нет.
     Сами подтверждения проверяются отдельно, подделкой функции confirm.
+
+    Память сессии здесь же уводится во временный файл. Она глобальная:
+    планировщик спрашивает её, не получая параметром, — и без подмены
+    пути тесты читали бы память разработчика. Тест, который падает
+    в зависимости от того, чем человек занимался в агенте вчера,
+    не проверяет ничего.
     """
+    monkeypatch.setenv("AGENT_SESSION_FILE", str(tmp_path / "session.json"))
     guard.set_policy(root=tmp_path, mode=guard.AUTO, dry_run=False)
     return tmp_path
 
@@ -1570,6 +1577,36 @@ class TestEditWithoutName:
 
     def test_названный_файл_важнее_догадки(self, project_pair):
         assert plan_kind("поправь main.py, сложение неверное") == ("fix", "main.py")
+
+    def test_названный_несуществующий_остаётся_созданием(self, project_pair):
+        """Регрессия, которую первая версия ветки внесла в обратную сторону.
+
+        «Поправь нетакого.py» — файл НАЗВАН, и его нет; это «напиши его».
+        Без проверки `not named` ветка «правка без названия» срабатывала
+        и здесь, адресом становился последний изменённый файл — и агент
+        шёл править посторонние заметки вместо того, чтобы создать
+        названный файл.
+        """
+        assert plan_kind("поправь нетакого.py") == ("needs_name", "")
+        assert plan_kind("исправь ошибки в new.py") == ("needs_name", "")
+
+    def test_адрес_ищется_по_всему_дереву(self, workspace):
+        """Проект из одного файла бывает только в учебнике."""
+        (workspace / "src").mkdir()
+        (workspace / "src" / "calc.py").write_text("def total():\n    return 0\n", encoding="utf-8")
+        kind, target = plan_kind("поправь total, считает неверно")
+        assert (kind, target) == ("fix", "total")
+
+    def test_регистр_в_цитате_не_мешает(self, workspace):
+        (workspace / "calc.py").write_text("df_dx = 1\n", encoding="utf-8")
+        assert plan_kind("поправь DF_DX") == ("fix", "DF_DX")
+
+    def test_заметки_адресом_не_становятся(self, workspace):
+        """Свежий README тронут по другому поводу, чем «оно не запускается»."""
+        (workspace / "app.py").write_text("print(1)\n", encoding="utf-8")
+        time.sleep(0.05)
+        (workspace / "README.md").write_text("# проект\n", encoding="utf-8")
+        assert plan_kind("исправь: оно не должно закрываться") == ("fix", "app.py")
 
     def test_в_пустом_каталоге_правка_остаётся_без_адреса(self, workspace):
         """Править нечего — значит, надо писать, и это прежняя ветка."""
@@ -3638,6 +3675,18 @@ class TestHandle:
         monkeypatch.setattr(agent8, "show_plan", lambda task, use_model=None: f"[план:{use_model}] {task}")
         assert handle("план поправь sample.py", session) == "[план:None] поправь sample.py"
         assert handle("план моделью поправь sample.py", session) == "[план:True] поправь sample.py"
+
+    def test_обычная_задача_запоминается(self, workspace, session, monkeypatch):
+        """Память бесполезна, если главный путь мимо неё.
+
+        Первая версия прокинула память только в ветку «langgraph …»,
+        и вся затея оказалась мертва: «Работаем над файлом» в обычном
+        диалоге не наполнялось, а планировщик спрашивал пустоту.
+        """
+        seen = {}
+        monkeypatch.setattr(agent8, "work", lambda task, **kw: seen.update(kw) or "ok")
+        handle("напиши приложение hello world", session)
+        assert seen.get("memory") is session.memory
 
     def test_langgraph_идёт_второй_сборкой(self, workspace, session, monkeypatch):
         seen = {}

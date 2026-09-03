@@ -394,6 +394,13 @@ CODE_SUFFIXES = (
     ".bat", ".cmd", ".sh", ".ps1",
 )
 
+# Суффиксы, среди которых ищут «последний, над чем работали». Уже, чем
+# CODE_SUFFIXES, и намеренно: писать агент умеет и в README, и в .json,
+# но «исправь: оно не должно закрываться» — это про работающую
+# программу, а не про заметки рядом с ней. Широкий список выбирал бы
+# адресом свежий SKILL.md, тронутый совсем по другому поводу.
+RUNNABLE_SUFFIXES = (".py", ".bat", ".cmd", ".sh", ".ps1")
+
 # Слова, которыми называют ВИД файла, не называя его имени: «сделай
 # батник», «нужен yaml». Нужны для одного вопроса — назван ли в задаче
 # целевой файл или только соседний, на который она ссылается.
@@ -519,9 +526,14 @@ def recent_file() -> str:
     не должно закрываться сразу» — ни имени файла, ни слова из кода,
     а человек совершенно точно имеет в виду то, что мы только что
     написали вместе.
+
+    Ищется по всему дереву, а не в корне: проект из одного файла бывает
+    только в учебнике, а поиск Главы 5, на который опирается соседняя
+    ветка, рекурсивен — двум способам адресовать один файл незачем
+    смотреть в разные места.
     """
     root = guard.get_workspace()
-    files = [p for p in root.glob("*") if p.is_file() and p.suffix in CODE_SUFFIXES]
+    files = [p for p in root.rglob("*") if p.is_file() and p.suffix in RUNNABLE_SUFFIXES]
     if not files:
         return ""
     return guard.relative(max(files, key=lambda p: p.stat().st_mtime))
@@ -583,11 +595,15 @@ def edit_address(task: str) -> str:
 def _first_hit(needle: str) -> str:
     """Первый файл рабочего каталога, где встречается строка."""
     root = guard.get_workspace()
-    for path in sorted(root.glob("*")):
+    lowered = needle.lower()
+    for path in sorted(root.rglob("*")):
         if not path.is_file() or path.suffix not in CODE_SUFFIXES:
             continue
         try:
-            if needle in path.read_text(encoding="utf-8"):
+            # Без учёта регистра: человек пишет «поправь DF_DX» о том же
+            # самом `df_dx`, и отказываться понимать его из-за раскладки
+            # значит уводить правку в посторонний файл.
+            if lowered in path.read_text(encoding="utf-8").lower():
                 return guard.relative(path)
         except (OSError, UnicodeDecodeError):
             continue
@@ -642,7 +658,14 @@ def plan_kind(task: str) -> tuple[str, str]:
     # изменённым файлом. Прежде такая задача уходила в ветку «имя
     # не назвали» и кончалась новым файлом с именем от модели —
     # рядом с тем, который просили поправить.
-    if matches(lowered, EDIT_VERBS) and not matches(lowered, CREATE_VERBS):
+    #
+    # `not named` здесь обязательно, и первая версия ветки без него
+    # ошиблась ровно в обратную сторону. «Поправь нетакого.py» — файл
+    # НАЗВАН и его нет; это «напиши его», и так сказано выше. Без
+    # проверки ветка срабатывала и здесь, адресом становился последний
+    # изменённый файл — и агент шёл править посторонние заметки вместо
+    # того, чтобы создать названный файл.
+    if not named and matches(lowered, EDIT_VERBS) and not matches(lowered, CREATE_VERBS):
         address = edit_address(task)
         if address:
             return KIND_FIX, address

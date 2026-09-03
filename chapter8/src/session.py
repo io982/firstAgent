@@ -42,6 +42,20 @@ from chapter8.src import guard
 # памятью. Заодно чужой проект не засоряется служебным файлом.
 DEFAULT_STATE_PATH = Path(__file__).parent.parent / "session.json"
 
+
+def state_path() -> Path:
+    """Где лежит память сессии. Переменная окружения сильнее умолчания.
+
+    Переменная нужна не для гибкости, а для честности проверок. Память —
+    состояние ГЛОБАЛЬНОЕ: планировщик спрашивает её, не получая
+    параметром, и без подмены пути тест читал бы файл разработчика.
+    Тогда `test_без_цитаты_берётся_последний_изменённый` начинал бы
+    падать в зависимости от того, чем человек занимался в агенте вчера,
+    — а тест, зависящий от вчерашнего дня, ничего не проверяет.
+    """
+    return Path(os.environ.get("AGENT_SESSION_FILE") or DEFAULT_STATE_PATH)
+
+
 WORKSPACE = "workspace"
 CURRENT_FILE = "current_file"
 LAST_TASK = "last_task"
@@ -68,7 +82,7 @@ class SessionMemory:
     """
 
     def __init__(self, path: Path | str | None = None):
-        self._memory = LongTermMemory(path or DEFAULT_STATE_PATH)
+        self._memory = LongTermMemory(path or state_path())
 
     def get(self, key: str) -> str:
         """Значение или пустая строка. Пустая — это «не помню», а не ошибка."""
