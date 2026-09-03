@@ -90,6 +90,7 @@ from chapter8.src.planner import (
     split_target,
     validate_plan,
 )
+from chapter8.src.session import KEYS, SessionMemory
 from chapter8.src.shell import (
     RUN_TOOLS,
     Run,
@@ -1553,6 +1554,16 @@ class TestEditWithoutName:
     def test_слова_которых_в_проекте_нет_не_адресуют(self, project_pair):
         """Выдуманное имя не должно уводить поиск в никуда — берём последний файл."""
         assert plan_kind("поправь незнакомое_имя_которого_нет") == ("fix", "run.bat")
+
+    def test_память_важнее_времени_изменения(self, project_pair, monkeypatch):
+        """«Последний по времени» — это и файл, который человек открыл сам."""
+        monkeypatch.setattr(planner_module, "remembered_file", lambda: "main.py")
+        assert plan_kind("исправь: оно не должно закрываться сразу") == ("fix", "main.py")
+
+    def test_чужая_память_не_адресует(self, project_pair, monkeypatch):
+        """Память живёт дольше каталога: файла из прошлого проекта здесь нет."""
+        monkeypatch.setattr(planner_module, "remembered_file", lambda: "")
+        assert plan_kind("исправь: оно не должно закрываться сразу") == ("fix", "run.bat")
 
     def test_глагол_создания_по_прежнему_создаёт(self, project_pair):
         assert plan_kind("напиши приложение которое считает факториал") == ("needs_name", "")
@@ -3378,6 +3389,98 @@ class TestLangGraphAbsence:
 # АГЕНТ: ВХОД, ШЕСТОЙ СПЕЦИАЛИСТ, ОТЧЁТ
 # ====================================================================
 
+class TestSessionMemory:
+    """Что агент помнит между запусками — на хранилище Главы 3.
+
+    Живые прогоны начинались одинаково: человек набирал `каталог
+    E:\\progects\\CodeAgentTests`, потому что агент про свой каталог
+    не помнил ничего. А потом писал «добавь ожидание ввода» — без
+    имени файла, потому что имел в виду тот, который они только что
+    писали вместе, и считал это очевидным. Оно и очевидно — для того,
+    у кого есть память.
+    """
+
+    @pytest.fixture
+    def memory(self, tmp_path):
+        return SessionMemory(tmp_path / "session.json")
+
+    def test_пустая_память_не_врёт(self, memory):
+        assert memory.get("workspace") == ""
+        assert "пуста" in memory.report()
+
+    def test_запомнил_и_вспомнил(self, memory):
+        memory.set("workspace", "E:/work")
+        assert memory.get("workspace") == "E:/work"
+
+    def test_память_переживает_перезапуск(self, tmp_path):
+        SessionMemory(tmp_path / "session.json").set("current_file", "main.py")
+        assert SessionMemory(tmp_path / "session.json").get("current_file") == "main.py"
+
+    def test_пустое_значение_стирает_а_не_пишет_пустоту(self, memory):
+        memory.set("current_file", "main.py")
+        memory.set("current_file", "   ")
+        assert memory.get("current_file") == ""
+
+    def test_каталог_запоминается(self, memory, workspace):
+        memory.note_workspace()
+        assert Path(memory.get("workspace")) == workspace
+
+    def test_каталог_восстанавливается(self, memory, workspace, tmp_path, monkeypatch):
+        monkeypatch.delenv("AGENT_WORKSPACE", raising=False)
+        memory.note_workspace()
+        other = tmp_path / "другой"
+        other.mkdir()
+        guard.set_workspace(other)
+        assert Path(memory.restore_workspace()) == workspace
+        assert guard.get_workspace() == workspace
+
+    def test_исчезнувший_каталог_не_восстанавливают(self, memory, tmp_path, monkeypatch):
+        """Каталог могли удалить между запусками, а агент без корня —
+        это агент без единственной границы, внутри которой ему можно писать.
+        """
+        monkeypatch.delenv("AGENT_WORKSPACE", raising=False)
+        memory.set("workspace", str(tmp_path / "которого-нет"))
+        before = guard.get_workspace()
+        assert memory.restore_workspace() == ""
+        assert guard.get_workspace() == before
+
+    def test_переменная_окружения_сильнее_памяти(self, memory, tmp_path, monkeypatch):
+        """Кто её выставил, сделал это только что; память — про прошлый раз."""
+        monkeypatch.setenv("AGENT_WORKSPACE", str(tmp_path))
+        memory.set("workspace", str(tmp_path))
+        assert memory.restore_workspace() == ""
+
+    def test_запоминается_файл_и_задача(self, memory):
+        memory.note_work("поправь сложение", ["calc.py"])
+        assert memory.get("current_file") == "calc.py"
+        assert memory.get("last_task") == "поправь сложение"
+
+    def test_файл_тестов_рабочим_не_считается(self, memory):
+        """Работали над модулем, тест к нему — следствие, а не адрес правки."""
+        memory.note_work("напиши модуль", ["calc.py", "test_calc.py"])
+        assert memory.get("current_file") == "calc.py"
+
+    def test_неудачный_прогон_не_стирает_адрес(self, memory):
+        """«Ну тогда сделай иначе» — про тот же файл, что и прошлая попытка."""
+        memory.note_work("напиши модуль", ["calc.py"])
+        memory.note_work("сделай иначе", [])
+        assert memory.get("current_file") == "calc.py"
+        assert memory.get("last_task") == "сделай иначе"
+
+    def test_забыть_можно_всё(self, memory):
+        memory.note_work("задача", ["calc.py"])
+        memory.note_workspace()
+        memory.forget_all()
+        assert all(memory.get(key) == "" for key in KEYS)
+        assert "пуста" in memory.report()
+
+    def test_отчёт_показывает_только_известное(self, memory):
+        memory.set("current_file", "calc.py")
+        report = memory.report()
+        assert "calc.py" in report
+        assert "Последняя задача" not in report
+
+
 class TestAgentEntry:
     """Главная развилка агента: задача идёт в конвейер, вопрос — к специалистам."""
 
@@ -3455,11 +3558,14 @@ class TestHandle:
     """
 
     @pytest.fixture
-    def session(self, monkeypatch):
+    def session(self, monkeypatch, tmp_path):
         """Сессия без диалогов: они тянут модель, а разбор её не трогает."""
         made = agent8.Session.__new__(agent8.Session)
         made.team = Team()
         made.conversations = {}
+        # Память во временном файле: настоящая лежит рядом с главой
+        # и пережила бы прогон тестов, унеся в следующий чужой каталог.
+        made.memory = SessionMemory(tmp_path / "session.json")
         monkeypatch.setattr(agent8, "work", lambda task, **kw: f"[конвейер] {task}")
         monkeypatch.setattr(agent8, "_ask", lambda question, s: f"[вопрос] {question}")
         return made
@@ -3537,7 +3643,8 @@ class TestHandle:
         seen = {}
         monkeypatch.setattr(agent8, "work", lambda task, **kw: seen.update(kw) or "ok")
         handle("langgraph напиши приложение", session)
-        assert seen == {"langgraph": True}
+        assert seen["langgraph"] is True
+        assert seen["memory"] is session.memory, "прогон второй сборкой тоже запоминается"
 
     def test_инструменты_перечисляются(self, workspace, session):
         text = handle("инструменты", session)

@@ -86,6 +86,7 @@ from chapter8.src.env import ENV_TOOLS, env_report
 from chapter8.src.fs import FS_TOOLS
 from chapter8.src.pipeline import coder_model, run_pipeline
 from chapter8.src.planner import make_plan, planner_model, render_plan, validate_plan
+from chapter8.src.session import SessionMemory
 from chapter8.src.shell import RUN_TOOLS
 from chapter8.src.vcs import GIT_TOOLS, current_branch, is_repo
 
@@ -322,7 +323,8 @@ def ask_agent(user_input: str, conversations: dict | None = None, max_iterations
 # КОНВЕЙЕР ПО ЗАДАЧЕ
 # ====================================================================
 
-def work(task: str, tests: str = "", langgraph: bool = False) -> str:
+def work(task: str, tests: str = "", langgraph: bool = False,
+         memory: SessionMemory | None = None) -> str:
     """Делает задачу: план, подтверждение, работа по плану, проверка.
 
     Главный вход агента. Сюда попадает всё, что похоже на задачу, —
@@ -345,6 +347,11 @@ def work(task: str, tests: str = "", langgraph: bool = False) -> str:
         parts.append(state.extra["plan_text"])
     if state.extra.get("edit_form"):
         parts.append(f"Форма правки: {state.extra['edit_form']}, попыток: {state.extra.get('attempt')}")
+    if memory is not None:
+        # Запоминается ПОСЛЕ прогона и по его следам: журнал изменений
+        # к этому моменту знает, что вышло, а план знал только, что
+        # собирались сделать.
+        memory.note_work(task, state.extra.get("touched"))
     parts.append(state.answer or "Прогон закончился без ответа.")
     return "\n".join(parts)
 
@@ -422,7 +429,9 @@ HELP = """Как работать с агентом.
   окружение         — есть ли .venv и каким Python работает агент
   инструменты       — чем агент располагает и во что обходится его промпт
   бюджет            — во что обходится окно контекста
+  память            — что агент помнит между запусками
   забудь            — очистить историю разговора
+  забудь сессию     — забыть каталог, файл и задачу
   помощь / выход"""
 
 
@@ -438,14 +447,22 @@ class Session:
     Тест бы это поймал; тестировать было негде.
     """
 
-    def __init__(self):
+    def __init__(self, memory: SessionMemory | None = None):
         self.team = TEAM
         self.conversations = new_conversations()
+        # Память сессии — то же хранилище, что в Главе 3, с другими
+        # ключами. Она переживает выход из агента, в отличие от диалогов.
+        self.memory = memory or SessionMemory()
 
     def forget(self) -> None:
         # Отметки о прошлом маршруте здесь нет: маршрутизировать не между
         # кем. Механизм коротких реплик-продолжений остался в Главе 7
         # вместе с пятью специалистами, между которыми он и различал.
+        #
+        # Память сессии здесь НЕ трогается, и это не забывчивость.
+        # «Забудь» человек говорит про разговор — чтобы прошлые реплики
+        # не мешали новой теме; терять при этом рабочий каталог было бы
+        # неожиданностью. Для памяти есть своя команда.
         self.conversations = new_conversations()
         chapter5_agent.reset_intent()
 
@@ -471,7 +488,7 @@ def handle(command: str, session: Session) -> str | None:
 
     # --- работа по задаче ---
     if lowered.startswith("langgraph "):
-        return work(text.split(" ", 1)[1], langgraph=True)
+        return work(text.split(" ", 1)[1], langgraph=True, memory=session.memory)
     if lowered.startswith("план моделью "):
         return show_plan(text.split(" ", 2)[2], use_model=True)
     if lowered.startswith(("план ", "plan ")):
@@ -485,6 +502,7 @@ def handle(command: str, session: Session) -> str | None:
         if not os.path.isdir(path):
             return f"❌ Нет такого каталога: {path}"
         guard.set_workspace(path)
+        session.memory.note_workspace()
         return workspace_report()
     if lowered in ("окружение", "env"):
         return env_report()
@@ -519,6 +537,11 @@ def handle(command: str, session: Session) -> str | None:
         if looks_like_task(rest):
             return "🧭 конвейер: план, подтверждение, работа по плану, проверка"
         return "🧭 вопрос: ответит исполнитель поиском по коду, без правок"
+    if lowered in ("память", "memory"):
+        return session.memory.report()
+    if lowered in ("забудь сессию", "забудь память"):
+        session.memory.forget_all()
+        return "🧹 Память сессии очищена: каталог, файл и задача забыты."
     if lowered in ("забудь", "reset", "сброс"):
         session.forget()
         return "🧹 История разговора очищена (файлы и индексы не тронуты)."
@@ -570,8 +593,14 @@ def main() -> None:
     # затиралась. Настройка, которая читается, но ни на что не влияет,
     # хуже отсутствующей — на неё рассчитывают.
     session = Session()
+    # Возврат туда, где работали в прошлый раз. Единственная настройка,
+    # которую человек вводил руками каждый запуск: всё остальное агент
+    # берёт из окружения, а каталог не брал ниоткуда.
+    restored = session.memory.restore_workspace()
 
     print(f"🤖 Кодинг-агент Главы 8 готов: {len(CODER_TOOLS)} инструментов, один исполнитель.")
+    if restored:
+        print(f"🧠 Вернулся в каталог прошлой сессии: {restored}")
     print(workspace_report())
     print(index_status())
     print()
