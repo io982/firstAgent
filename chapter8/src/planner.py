@@ -1,0 +1,930 @@
+"""
+Планировщик: задача человека — в шаги, которые можно показать до правки (8.4).
+
+Зачем он вообще нужен. Агент, который правит файлы, отличается от агента,
+который отвечает текстом, одним: его ошибку нельзя не заметить постфактум,
+её можно только предотвратить заранее. Значит нужен момент, когда человек
+видит, что агент СОБИРАЕТСЯ сделать, — и этот момент должен наступить
+раньше первой записи на диск.
+
+План и есть такой момент. Не «улучшение качества», а точка остановки:
+список шагов, который печатается человеку и ждёт подтверждения.
+
+Что здесь план, а что не план. Планировщик решает, ЧТО менять: в каком
+файле, что искать, чем проверять. Он НЕ решает, в каком порядке
+выполняются шаги внутри одной правки — «найти, прочитать, изменить,
+прогнать тесты» — это последовательность, известная заранее, и она
+записана графом (см. pipeline.py). Модель, которой дают решать
+и то и другое, ошибается вдвое чаще, а проверить её решение вдвое труднее.
+
+Кто составляет план — вопрос, на который отвечает замер, а не вкус.
+Ответ оказался неудобным: **на 3B план от модели хуже плана из кода.**
+Пять задач правки, план от `qwen2.5:3b` — 2 зелёных прогона из 5
+за 136 секунд; план из трёх шагов, собранный кодом, — 5 из 5 за 17.
+Причина видна в отчёте замера: шаг правки был только в 3 планах модели
+из 5, а план, в котором нечего исполнять, исполнить нельзя.
+
+Поэтому по умолчанию планирует код (`PLANNER = "fallback"`), а запрос
+к модели включается переменной `AGENT_PLANNER`. Это ровно тот же
+поворот, что в Главе 7 с маршрутизацией: механизм написан, замерен
+и выключен, потому что простое правило выиграло.
+
+Отсюда же и роль самого плана. Он нужен не агенту, а человеку: это
+список из трёх строк, который показывают до первой записи на диск
+и на который отвечают «да» или «нет». Планирование как способ поднять
+качество правки на 3B не работает; планирование как точка остановки
+работает всегда.
+
+Модель планировщика при этом остаётся отдельным параметром
+(`AGENT_PLANNER_MODEL`): планирование и написание кода — разная работа,
+и утверждение «специализированная модель планирует лучше» проверяется
+тем же замером на той машине, где стоит такая модель.
+"""
+from __future__ import annotations
+
+import json
+import os
+import time
+from dataclasses import dataclass, field
+
+import chapter1.agent as base
+from chapter1.agent import request_model
+from chapter5.agent import matches
+from chapter7.src.models import using_model
+from chapter8.src import guard
+
+# --------------------------------------------------------------------
+# ЯЗЫК ПЛАНА
+# --------------------------------------------------------------------
+# Шесть действий, и список закрыт. Закрыт потому, что действие уезжает
+# в `enum` схемы ответа: то, чего нет в списке, модель не сможет назвать
+# физически — грамматика декодирования не разрешит такие токены.
+# Это тот же приём, которым Глава 2 запретила выдумывать инструменты.
+SEARCH = "search"
+READ = "read"
+CREATE = "create"
+EDIT = "edit"
+RUN = "run"
+TEST = "test"
+
+PLAN_ACTIONS = (SEARCH, READ, CREATE, EDIT, RUN, TEST)
+
+# Установки зависимостей в этом списке НЕТ, и это решение, а не забывчивость.
+# Какие пакеты нужны — не мнение модели, а факт, который вычисляется
+# из написанного кода: разобрать импорты и спросить у интерпретатора,
+# какие из них не разрешаются (env.missing_imports). Отдать такой вопрос
+# модели значит получить план, где она ставит `requests` в задаче
+# без единого сетевого вызова. Поэтому зависимости — отдельный узел
+# конвейера, а не шаг плана.
+
+# Действия названы по-английски, хотя весь остальной текст курса русский.
+# Причина не в моде: `enum` разбирается по токенам, а русское слово
+# для модели на 3B — это три-четыре токена вместо одного, и вероятность
+# сбиться на середине слова заметно выше.
+ACTION_HELP = {
+    SEARCH: "найти в проекте место по тексту. target — что искать",
+    READ: "прочитать файл. target — путь к файлу",
+    CREATE: "создать новый файл. target — путь к файлу, detail — что в нём должно быть",
+    EDIT: "изменить существующий файл. target — путь к файлу",
+    RUN: "выполнить команду. target — сама команда, например «python app.py»",
+    TEST: "прогнать тесты. target — путь к тестам или пусто",
+}
+
+# Потолок длины плана. Не из вкуса: план на 3B длиннее шести шагов
+# перестаёт быть планом и становится пересказом задачи своими словами.
+MAX_STEPS = 6
+
+# Сколько имён файлов показать планировщику. Список файлов нужен, чтобы
+# он назвал существующий путь, а не выдумал похожий, — но весь проект
+# в контекст не влезет.
+FILES_IN_PROMPT = 40
+
+# Источник плана. Строками, а не флагом: в отчёте замера различать
+# надо три случая, а не два — модель, запасной план и его отсутствие.
+FROM_MODEL = "model"
+FROM_FALLBACK = "fallback"
+
+PLANNER_MODEL = os.environ.get("AGENT_PLANNER_MODEL", "")
+
+# Кто составляет план по умолчанию: "fallback" — код, "model" — модель.
+#
+# По умолчанию код, и это не осторожность, а результат замера главы
+# (TestPlannerModels). На пяти задачах правки план от `qwen2.5:3b` дал
+# 2 зелёных прогона из 5 за 136 с, а план из трёх шагов без всякой
+# модели — 5 из 5 за 17 с. Причина видна в соседней колонке отчёта:
+# шаг правки был только в 3 планах модели из 5. План, в котором нечего
+# исполнять, исполнить нельзя.
+#
+# Это ровно тот же вывод, к которому Глава 7 пришла про маршрутизацию:
+# на слабой модели простое правило обыгрывает запрос к модели, и
+# по умолчанию работает правило. Механизм при этом остаётся на месте —
+# переменной AGENT_PLANNER его включают обратно.
+PLANNER = os.environ.get("AGENT_PLANNER", "fallback")
+
+
+def planner_model() -> str:
+    """Какая модель составляет план.
+
+    Пустая переменная окружения означает «та же, что у всего курса»,
+    а не «никакая»: агент должен работать сразу после установки,
+    без второй модели на диске.
+    """
+    return PLANNER_MODEL or base.MODEL
+
+
+@dataclass
+class Step:
+    """Один шаг плана."""
+
+    action: str
+    target: str = ""
+    detail: str = ""
+    why: str = ""
+
+    def line(self, number: int) -> str:
+        """Шаг одной строкой — так его увидит человек."""
+        head = f"{number}. {self.action} {self.target}".rstrip()
+        tail = f" — {self.detail}" if self.detail else ""
+        return head + tail
+
+    def to_dict(self) -> dict[str, str]:
+        return {"action": self.action, "target": self.target, "detail": self.detail, "why": self.why}
+
+
+@dataclass
+class Plan:
+    """План целиком плюс всё, что нужно знать о его происхождении.
+
+    Происхождение хранится вместе с планом, а не рядом, потому что
+    замер главы сравнивает планы РАЗНЫХ источников: без поля `source`
+    отчёт пришлось бы собирать из двух списков и следить за их
+    соответствием.
+    """
+
+    task: str
+    steps: list[Step] = field(default_factory=list)
+    source: str = FROM_FALLBACK
+    model: str = ""
+    seconds: float = 0.0
+    problems: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict:
+        return {
+            "task": self.task,
+            "steps": [s.to_dict() for s in self.steps],
+            "source": self.source,
+            "model": self.model,
+            "seconds": round(self.seconds, 2),
+            "problems": list(self.problems),
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> Plan:
+        steps = [Step(**{k: v for k, v in s.items() if k in Step.__dataclass_fields__}) for s in data.get("steps", [])]
+        known = {k: v for k, v in (data or {}).items() if k in cls.__dataclass_fields__ and k != "steps"}
+        return cls(steps=steps, **known)
+
+
+# --------------------------------------------------------------------
+# СХЕМА И ПРОМПТ
+# --------------------------------------------------------------------
+
+def plan_schema() -> dict:
+    """JSON Schema плана — уезжает в Ollama параметром `format`.
+
+    Та же идея, что у схемы ответа в Главе 2: не «попроси модель
+    ответить JSON'ом», а запрети ей генерировать что-либо другое.
+    Разбор плана тогда не нуждается в спасательных ветках на случай
+    «модель написала пояснение перед JSON».
+    """
+    return {
+        "type": "object",
+        "properties": {
+            "steps": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": MAX_STEPS,
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "action": {"type": "string", "enum": list(PLAN_ACTIONS)},
+                        "target": {"type": "string"},
+                        "detail": {"type": "string"},
+                        "why": {"type": "string"},
+                    },
+                    "required": ["action", "target", "detail"],
+                },
+            }
+        },
+        "required": ["steps"],
+    }
+
+
+def project_files(limit: int = FILES_IN_PROMPT) -> list[str]:
+    """Имена файлов проекта для промпта планировщика.
+
+    Без этого списка модель называет правдоподобные, но несуществующие
+    пути — `src/main.py` там, где файл лежит в корне. Проверка потом
+    их отвергает, но круг всё равно потрачен.
+    """
+    from chapter8.src.fs import SKIP_DIRS
+
+    root = guard.get_workspace()
+    names: list[str] = []
+    for path in sorted(root.rglob("*.py")):
+        if any(part in SKIP_DIRS for part in path.parts):
+            continue
+        names.append(guard.relative(path))
+        if len(names) >= limit:
+            break
+    return names
+
+
+# Язык промпта планировщика: "ru" или "en".
+#
+# Вопрос не про вкус и не про то, «на каком языке говорит курс». План —
+# внутренний артефакт: его действия и пути одинаковы на любом языке,
+# а человек в окне подтверждения читает в основном их. Зато цена языка
+# разная: русское слово для модели на 3B — это три-четыре токена против
+# одного-двух у английского, то есть тот же промпт по-русски занимает
+# заметно больше окна и хуже ложится на распределение, на котором модель
+# училась.
+#
+# Что из этого выходит на деле, говорит замер (TestPlannerLanguage).
+PLANNER_LANG = os.environ.get("AGENT_PLANNER_LANG", "ru")
+
+# Описания действий по-английски. Отдельный словарь, а не перевод
+# на лету: имена самих действий (`search`, `create`) английские в обоих
+# случаях, и подменяется только пояснение к ним.
+ACTION_HELP_EN = {
+    SEARCH: "find a place in the project by text. target — what to search for",
+    READ: "read a file. target — path to the file",
+    CREATE: "create a new file. target — path, detail — what it must contain",
+    EDIT: "change an existing file. target — path to the file",
+    RUN: "run a command. target — the command itself, e.g. «python app.py»",
+    TEST: "run the tests. target — path to tests or empty",
+}
+
+
+def build_planner_prompt(task: str, files: list[str] | None = None, language: str | None = None) -> str:
+    """Системный промпт планировщика.
+
+    Собирается функцией, а не лежит константой, потому что список
+    действий и список файлов — источники истины, и промпт должен идти
+    за ними. Расхождение промпта с `enum` схемы — это ошибка, которую
+    невозможно увидеть, читая один из двух файлов.
+
+    Две версии, русская и английская, отличаются ТОЛЬКО языком: те же
+    правила, тот же порядок, те же примеры. Иначе замер сравнивал бы
+    не язык, а два разных промпта.
+    """
+    lang = (language or PLANNER_LANG).lower()
+    listing = files if files is not None else project_files()
+    empty = not listing
+
+    if lang == "en":
+        actions = "\n".join(f"- {name}: {text}" for name, text in ACTION_HELP_EN.items())
+        known = "\n".join(f"- {name}" for name in listing) or "- (no .py files in the project yet)"
+        if empty:
+            rules = f"""1. At most {MAX_STEPS} steps. A short plan beats a detailed one.
+2. ONE PROGRAM — ONE FILE. All functions go into that same file.
+   Do not create a file per function: it does not make the program better,
+   it only ties it together with imports you could do without.
+3. Create a second file only for tests, named test_<name>.py.
+   More than two files — only if the task explicitly asks for several modules.
+4. The directory is empty — start with create and invent clear file names.
+   In detail describe what must be in the file.
+5. The last step is always test.
+
+Example plan for the task «a program that adds two numbers»:
+  create calc.py — function add(a, b), returns the sum
+  create test_calc.py — test: add(2, 2) == 4
+  test — run the tests
+
+Example of a WRONG plan for the same task:
+  create add.py — the addition function
+  create input.py — the input function
+  create output.py — the output function
+  create main.py — the main logic
+Four files where one is enough."""
+        else:
+            rules = f"""1. At most {MAX_STEPS} steps. A short plan beats a detailed one.
+2. In target for read and edit take a path FROM THE LIST below. Do not invent new paths.
+3. A new file is create, and there you do invent the name.
+4. In detail write what exactly must come out, in one phrase.
+5. If it is unclear where to change, make search the first step.
+6. The last step is always test — work that cannot be checked cannot be approved."""
+
+        return f"""You plan work on code. Only the plan; you do not write the code itself.
+
+Available actions:
+{actions}
+
+Rules:
+{rules}
+
+Project files:
+{known}
+
+Task: {task}"""
+
+    actions = "\n".join(f"- {name}: {help_text}" for name, help_text in ACTION_HELP.items())
+    known = "\n".join(f"- {name}" for name in listing) or "- (файлов .py в проекте пока нет)"
+
+    # Промпт разный для пустого каталога и для существующего проекта,
+    # и это не украшение. В пустом каталоге правило «бери путь из списка
+    # файлов» невыполнимо: списка нет, а придумать имя файла — как раз
+    # то, ради чего планировщик и зовут. В существующем проекте всё
+    # наоборот: придуманное имя означает промах, и запрещать его надо
+    # прямо. Один промпт на оба случая противоречил бы сам себе.
+    if empty:
+        rules = f"""1. Шагов не больше {MAX_STEPS}. Короткий план лучше подробного.
+2. ОДНА ПРОГРАММА — ОДИН ФАЙЛ. Все функции пишутся в него же.
+   Не заводи файл на каждую функцию: это не делает программу лучше,
+   а связывает её импортами, которых можно не иметь.
+3. Второй файл заводи только под тесты, с именем test_<имя>.py.
+   Больше двух файлов — только если задача прямо просит несколько модулей.
+4. Каталог пустой — начинай с create и придумай понятные имена файлов.
+   В detail опиши, что должно быть в файле.
+5. Последний шаг всегда test.
+
+Пример плана для задачи «программа, которая складывает два числа»:
+  create calc.py — функция add(a, b), возвращает сумму
+  create test_calc.py — тест: add(2, 2) == 4
+  test — прогнать тесты
+
+Пример НЕПРАВИЛЬНОГО плана для той же задачи:
+  create add.py — функция сложения
+  create input.py — функция ввода
+  create output.py — функция вывода
+  create main.py — основная логика
+Четыре файла там, где хватает одного."""
+    else:
+        rules = f"""1. Шагов не больше {MAX_STEPS}. Короткий план лучше подробного.
+2. В target для read и edit бери путь ИЗ СПИСКА ниже. Не выдумывай новых путей.
+3. Новый файл — это create, и вот там имя придумываешь ты.
+4. В detail пиши, что именно должно получиться, одной фразой.
+5. Если непонятно, где менять, первым шагом ставь search.
+6. Последний шаг всегда test — работу, которую нечем проверить, подтвердить нельзя."""
+
+    return f"""Ты составляешь план работы над кодом. Только план, сам код ты не пишешь.
+
+Доступные действия:
+{actions}
+
+Правила:
+{rules}
+
+Файлы проекта:
+{known}
+
+Задача: {task}"""
+
+
+# --------------------------------------------------------------------
+# СОСТАВЛЕНИЕ ПЛАНА
+# --------------------------------------------------------------------
+
+# Расширения, по которым слово в задаче считается именем файла.
+# Список закрыт намеренно: без него именем файла становится любое
+# слово с точкой, включая «т.е.» и конец предложения.
+CODE_SUFFIXES = (
+    ".py", ".txt", ".md", ".json", ".toml", ".cfg", ".ini", ".yml", ".yaml",
+    ".bat", ".cmd", ".sh", ".ps1",
+)
+
+# Слова, которыми называют ВИД файла, не называя его имени: «сделай
+# батник», «нужен yaml». Нужны для одного вопроса — назван ли в задаче
+# целевой файл или только соседний, на который она ссылается.
+KIND_WORDS = {
+    "bat": ".bat", "батник": ".bat", "батник.": ".bat", "cmd": ".cmd",
+    "sh": ".sh", "bash": ".sh", "shell": ".sh",
+    "ps1": ".ps1", "powershell": ".ps1",
+    "json": ".json", "yaml": ".yaml", "yml": ".yaml", "toml": ".toml",
+    "markdown": ".md", "readme": ".md",
+}
+
+# Глаголы создания и глаголы правки. Основами, как везде в курсе.
+CREATE_VERBS = ("напиш", "созда", "сдела", "реализ", "сгенерир", "наброса")
+EDIT_VERBS = ("поправ", "почин", "исправ", "измен", "перепиш", "переимен",
+              "отрефактор", "добав", "удал", "дополн", "допиш")
+
+# Слова, которыми задачу делят на части. Их наличие означает, что вещей
+# просят больше одной, и планировать это кодом нельзя.
+SEQUENCE_WORDS = ("затем", "потом", "после этого", "а также", "и ещё", "и еще", "далее")
+
+# Слова, которыми в задаче просят ещё и тесты.
+TEST_WORDS = ("и тест", "с тестом", "с тестами", "тесты к", "тест к", "покрой тестами")
+
+# Виды плана.
+KIND_FIX = "fix"                # правка названного существующего файла
+KIND_ONE_FILE = "one_file"      # написать названный файл
+KIND_NEEDS_NAME = "needs_name"  # написать один файл, но имя не названо
+KIND_MODEL = "model"            # вещей больше одной, планировать кодом нечего
+
+
+def named_file(task: str) -> str:
+    """Имя файла, названное в задаче, — или пустая строка.
+
+    Просто имя, без вопроса о том, существует ли оно: этот вопрос
+    задают выше, и ответы на него ведут в разные стороны.
+    """
+    for word in task.replace(",", " ").replace("«", " ").replace("»", " ").split():
+        candidate = word.strip(".:;!?()[]\"'")
+        if not candidate.lower().endswith(CODE_SUFFIXES):
+            continue
+        try:
+            guard.resolve_path(candidate)
+        except guard.OutsideWorkspace:
+            continue
+        return candidate
+    return ""
+
+
+def asks_other_kind(task: str, named: str) -> bool:
+    """Просит ли задача файл ДРУГОГО вида, чем названный в ней.
+
+    Нужно для случая из живого прогона: «сделай bat файл для запуска
+    calc.py». Имя файла в задаче есть — `calc.py`, — но это не цель,
+    а ссылка: делать просят батник, а его имя не назвали.
+    """
+    if not named:
+        return False
+    suffix = "." + named.rsplit(".", 1)[-1].lower()
+    words = task.lower().replace(",", " ").replace("-", " ").split()
+    return any(KIND_WORDS[w] != suffix for w in words if w in KIND_WORDS)
+
+
+def wants_tests(task: str) -> bool:
+    """Просит ли задача написать ещё и тесты."""
+    return matches(f" {task.lower().strip()} ", TEST_WORDS)
+
+
+# Слова, которыми просят КАРКАС: файл с определениями и описаниями,
+# но без кода внутри. Это законный результат работы, а не недоделка,
+# и узнать его надо ДО того, как писателю уйдут правила «никаких
+# заглушек»: иначе домашнее правило переспорит просьбу человека.
+# Живой прогон показал ровно это — на «напиши каркас приложения»
+# агент написал работающее приложение.
+#
+# Слова «заглушка» в списке нет намеренно. Живая форма просьбы —
+# «без заглушек», то есть противоположное; корень бы совпал,
+# и агент делал бы наоборот.
+SCAFFOLD_WORDS = (
+    "каркас", "скелет", "заготовк", "болванк", "scaffold",
+    "без реализаци", "без кода", "не пиши код", "только сигнатур",
+    "только определени", "только комментари", "пустые функци", "пустыми функци",
+)
+
+
+def wants_scaffold(task: str) -> bool:
+    """Просит ли задача каркас вместо работающего кода."""
+    return matches(f" {task.lower().strip()} ", SCAFFOLD_WORDS)
+
+
+def plan_kind(task: str) -> tuple[str, str]:
+    """Каким планом делается эта задача. Пара «вид, целевой файл».
+
+    Главная развилка главы, и к нынешнему виду она пришла тремя живыми
+    прогонами подряд. Каждый показывал одно и то же: **план от модели
+    портит задачу.** Он пересказывает её короче, чем она была, теряет
+    требования, а на задаче про квадратное уравнение развалил одну
+    маленькую программу на четыре файла — по файлу на функцию — и уронил
+    весь прогон. Та же модель, спрошенная в чате напрямую, писала один
+    правильный файл с первого раза.
+
+    Поэтому кодом строится всё, что выводится из задачи однозначно,
+    а у модели остаётся ровно один вопрос — как назвать файл:
+
+      1. слова-разделители («затем», «а также») — просят больше одной
+         вещи, и вот тут без плана от модели не обойтись;
+      2. глагол создания и названный файл — пишем этот файл (есть он
+         или нет: «сделай calc.py» второй раз значит «напиши заново»);
+      3. названный существующий файл — правим. Глагол не обязателен:
+         «в calc.py функция add вычитает» — задача без повелительного
+         наклонения, и это самая частая форма просьбы;
+      4. всё остальное — одна программа, имя которой не назвали.
+    """
+    lowered = f" {task.lower().strip()} "
+
+    if matches(lowered, SEQUENCE_WORDS):
+        return KIND_MODEL, ""
+
+    named = named_file(task)
+    if named and not asks_other_kind(task, named):
+        if matches(lowered, CREATE_VERBS):
+            return KIND_ONE_FILE, named
+        try:
+            path = guard.resolve_path(named)
+        except guard.OutsideWorkspace:
+            return KIND_NEEDS_NAME, ""
+        if path.is_file():
+            return KIND_FIX, guard.relative(path)
+
+    return KIND_NEEDS_NAME, ""
+
+
+def looks_like_fix(task: str) -> str:
+    """Путь существующего файла, который задача просит поправить."""
+    kind, target = plan_kind(task)
+    return target if kind == KIND_FIX else ""
+
+
+def looks_like_one_file(task: str) -> str:
+    """Имя файла, который задача просит написать."""
+    kind, target = plan_kind(task)
+    return target if kind == KIND_ONE_FILE else ""
+
+
+def file_name_schema() -> dict:
+    """Схема ответа на единственный вопрос, который остался модели.
+
+    Одно поле. Это самая маленькая работа, какую ей тут можно поручить,
+    и именно поэтому она ей поручена: придумать имя файла кодом нельзя,
+    а всё остальное — можно. Ошибиться в одном коротком поле труднее,
+    чем в пятишаговом плане, и цена ошибки — неудачное имя, а не
+    потерянные требования задачи.
+    """
+    return {
+        "type": "object",
+        "properties": {"filename": {"type": "string"}},
+        "required": ["filename"],
+    }
+
+
+NAME_RULES = """Тебе дана задача. Ответь ОДНИМ именем файла, в котором она будет решена.
+
+Правила:
+1. Только имя файла с расширением: calc.py, quadratic.py, run.bat.
+2. Латиницей, строчными буквами, слова через подчёркивание.
+3. Никаких путей и папок — файл ляжет в рабочий каталог.
+4. Расширение по виду задачи: программа на Python — .py, батник — .bat.
+5. Кода не пиши, объяснений не давай."""
+
+# Имя, которым агент называет файл, когда спросить не у кого.
+# Не «заглушка на всякий случай»: без модели план должен строиться
+# целиком, иначе конвейер встанет там, где Ollama не запущена.
+DEFAULT_NAME = "main.py"
+
+
+def ask_filename(task: str, model: str | None = None) -> str:
+    """Спрашивает у модели имя файла. Не ответила — `main.py`."""
+    messages = [{"role": "system", "content": NAME_RULES}, {"role": "user", "content": task}]
+    try:
+        with using_model(model or planner_model()):
+            raw = request_model(messages, response_format=file_name_schema())
+        name = str(json.loads(raw).get("filename", "")).strip().strip("'\"")
+    except Exception:  # noqa: BLE001
+        return DEFAULT_NAME
+
+    name = name.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
+    if not name.lower().endswith(CODE_SUFFIXES) or " " in name:
+        return DEFAULT_NAME
+    try:
+        guard.resolve_path(name)
+    except guard.OutsideWorkspace:
+        return DEFAULT_NAME
+    return name
+
+
+def one_file_plan(task: str, target: str) -> Plan:
+    """План «напиши этот файл»: создать и проверить.
+
+    Описание шага — САМА ЗАДАЧА, слово в слово. В этом весь смысл:
+    между формулировкой человека и моделью, которая пишет код,
+    не встаёт ничего. План от модели на том же месте пересказывает
+    задачу короче и теряет требования — три живых прогона подряд.
+
+    Второй файл заводится, только если задача просит тесты. Сам агент
+    их не выдумывает: тест, которого не просили, всё равно нечем
+    проверить на правильность, а провалиться он умеет.
+    """
+    steps = [Step(CREATE, target, task, "задача сводится к одному файлу")]
+    if wants_tests(task) and target.endswith(".py"):
+        name = target.rsplit("/", 1)[-1]
+        steps.append(
+            Step(CREATE, f"test_{name}", f"тесты к {target} по задаче: {task}", "задача просит тесты")
+        )
+    steps.append(Step(TEST, "", "прогнать проверку", "работу без проверки не считают сделанной"))
+    return Plan(task=task, steps=steps, source=FROM_FALLBACK)
+
+
+def fallback_plan(task: str) -> Plan:
+    """План без единого запроса к модели. Три вида, все выводятся из задачи.
+
+    **Правка названного существующего файла** — найти, изменить, проверить.
+
+    **Написать названный файл** — создать и проверить.
+
+    **Написать файл, имя которого не назвали** — то же самое, но имя
+    берётся `main.py`. Спросить имя у модели умеет `make_plan`; здесь
+    модели нет по определению, и план всё равно должен получиться:
+    конвейер не имеет права встать там, где Ollama не запущена.
+
+    **Больше одной вещи** — планировать кодом нечего, возвращается
+    пустой план с претензией.
+    """
+    kind, target = plan_kind(task)
+
+    if kind == KIND_FIX:
+        return Plan(
+            task=task,
+            steps=[
+                Step(SEARCH, target, "найти место, которого касается задача", "без адреса править нечего"),
+                Step(EDIT, "", "внести правку по задаче", "это сама работа"),
+                Step(TEST, "", "прогнать тесты", "правку без проверки не считают сделанной"),
+            ],
+            source=FROM_FALLBACK,
+        )
+
+    if kind == KIND_ONE_FILE:
+        return one_file_plan(task, target)
+
+    if kind == KIND_NEEDS_NAME:
+        return one_file_plan(task, DEFAULT_NAME)
+
+    return Plan(
+        task=task,
+        steps=[],
+        source=FROM_FALLBACK,
+        problems=["в задаче просят больше одной вещи — такой план кодом не построить"],
+    )
+
+
+def make_plan(
+    task: str,
+    model: str | None = None,
+    files: list[str] | None = None,
+    use_model: bool | None = None,
+    language: str | None = None,
+) -> Plan:
+    """План задачи. Кто его составит, решает вид задачи.
+
+    Правило одно и проверяемое: задача называет существующий файл —
+    план строит код, не называет — спрашиваем модель. Первое опирается
+    на замер главы (на задачах правки код обыграл модель 5:2), второе —
+    на то, что у кода там просто нет ответа: сколько файлов завести
+    и как их назвать, из текста задачи не выводится.
+
+    `use_model` перекрывает правило для одного вызова, `PLANNER=model`
+    в окружении — для всей сессии. Явно названная модель включает её
+    сама: спросить `make_plan(task, model="...")` и получить ответ
+    без модели было бы неожиданностью.
+
+    При любой беде со стороны модели возвращается запасной план.
+    Это не лень в обработке ошибок: планировщик стоит перед конвейером,
+    и его падение останавливало бы работу целиком. Человек в любом
+    случае видит в отчёте, какой из двух планов перед ним.
+    """
+    task = (task or "").strip()
+    if not task:
+        return Plan(task="", source=FROM_FALLBACK, problems=["пустая задача"])
+
+    kind, _ = plan_kind(task)
+
+    if use_model is None:
+        # К полноценному планировщику идёт только то, где вещей просят
+        # больше одной. Всё остальное строится кодом, и это не
+        # осторожность, а три живых прогона подряд: план от модели
+        # пересказывает задачу короче, чем она была, и теряет требования.
+        # На задаче «сделай calc.py, приложение должно ждать ввода» он
+        # свёлся к списку арифметических функций — вышла библиотека
+        # вместо приложения. На задаче про квадратное уравнение развалил
+        # одну маленькую программу на четыре файла, по файлу на функцию,
+        # и уронил прогон. Та же модель в чате писала один правильный
+        # файл с первого раза.
+        use_model = bool(model) or PLANNER == "model" or kind == KIND_MODEL
+
+    if not use_model:
+        if kind == KIND_NEEDS_NAME:
+            # Единственное, что кодом не выводится, — имя файла. За ним
+            # и только за ним идём к модели: короткий вопрос вместо
+            # пятишагового плана, и цена ошибки — неудачное имя,
+            # а не потерянные требования задачи.
+            return one_file_plan(task, ask_filename(task))
+        return fallback_plan(task)
+
+    chosen = model or planner_model()
+    messages = [
+        {"role": "system", "content": build_planner_prompt(task, files, language)},
+        {"role": "user", "content": task},
+    ]
+
+    started = time.monotonic()
+    try:
+        with using_model(chosen):
+            raw = request_model(messages, response_format=plan_schema())
+    except Exception as exc:
+        plan = fallback_plan(task)
+        plan.problems = [f"модель не ответила: {exc}"]
+        plan.seconds = time.monotonic() - started
+        return plan
+    spent = time.monotonic() - started
+
+    steps, problems = parse_plan(raw)
+    if not steps:
+        plan = fallback_plan(task)
+        plan.problems = problems or ["модель вернула пустой план"]
+        plan.seconds = spent
+        plan.model = chosen
+        return plan
+
+    return Plan(task=task, steps=steps, source=FROM_MODEL, model=chosen, seconds=spent, problems=problems)
+
+
+def split_target(target: str) -> tuple[str, str]:
+    """Отделяет путь от описания, если модель слепила их в одно поле.
+
+    Живая 3B регулярно отвечает так:
+
+        {"action": "edit", "target": "calc.py: почему неверно работает add?"}
+
+    Путь и объяснение в одном поле — и путь после этого не находится.
+    Промпт про поля говорит; модель всё равно склеивает, потому что
+    в её голове это один ответ на вопрос «где».
+
+    Разделяется консервативно: берётся первое слово, и оно принимается
+    за путь ТОЛЬКО если такой файл в рабочем каталоге действительно есть.
+    Не подтвердилось — target возвращается как был. Отрезать по двоеточию
+    вслепую нельзя: у пути `C:\\work\\a.py` двоеточие своё.
+    """
+    text = target.strip()
+    if not text or " " not in text.rstrip(":") and ":" not in text.rstrip(":"):
+        return text, ""
+
+    head = text.split()[0].rstrip(":,;")
+    if head == text:
+        return text, ""
+    try:
+        if guard.resolve_path(head).is_file():
+            return head, text[len(text.split()[0]):].strip(" :,;")
+    except guard.OutsideWorkspace:
+        return text, ""
+    return text, ""
+
+
+def parse_plan(raw: str) -> tuple[list[Step], list[str]]:
+    """Разбирает ответ модели в шаги. Вторым значением — список претензий.
+
+    Отдельной функцией от make_plan, потому что разбор надо проверять
+    тестом без модели: ответ модели каждый раз разный, а его разбор —
+    нет, и путать эти две вещи в одном тесте значит не проверить ни одну.
+    """
+    try:
+        data = json.loads(raw)
+    except (TypeError, ValueError) as exc:
+        return [], [f"ответ не разобрался как JSON: {exc}"]
+
+    if not isinstance(data, dict) or not isinstance(data.get("steps"), list):
+        return [], ["в ответе нет списка steps"]
+
+    steps: list[Step] = []
+    problems: list[str] = []
+    for number, item in enumerate(data["steps"], start=1):
+        if not isinstance(item, dict):
+            problems.append(f"шаг {number}: не объект")
+            continue
+        action = str(item.get("action", "")).strip().lower()
+        if action not in PLAN_ACTIONS:
+            problems.append(f"шаг {number}: неизвестное действие {action!r}")
+            continue
+        target = str(item.get("target", "")).strip()
+        detail = str(item.get("detail", "")).strip()
+        if action in (READ, EDIT, CREATE):
+            target, spilled = split_target(target)
+            if spilled and not detail:
+                detail = spilled
+        steps.append(Step(action=action, target=target, detail=detail, why=str(item.get("why", "")).strip()))
+
+    if len(steps) > MAX_STEPS:
+        problems.append(f"шагов {len(steps)}, оставлены первые {MAX_STEPS}")
+        steps = steps[:MAX_STEPS]
+    return steps, problems
+
+
+# --------------------------------------------------------------------
+# ПРОВЕРКА ПЛАНА
+# --------------------------------------------------------------------
+
+def validate_plan(plan: Plan) -> list[str]:
+    """Список претензий к плану. Пустой список — план годен к исполнению.
+
+    Проверка отдельным вызовом, а не внутри make_plan, по той же
+    причине, что и `Graph.validate()` в Главе 7: проверять хочется
+    и планы, собранные руками, и планы, поднятые из чекпоинта.
+
+    Претензии не мешают показать план человеку — они показываются
+    вместе с ним. Решение «всё равно выполнить» остаётся за человеком:
+    план, отвергнутый молча, ничему его не учит.
+    """
+    problems: list[str] = []
+
+    if not plan.steps:
+        return ["план пуст"]
+    if len(plan.steps) > MAX_STEPS:
+        problems.append(f"шагов {len(plan.steps)}, потолок {MAX_STEPS}")
+
+    # Был ли раньше шаг поиска. Нужно потому, что путь можно не знать
+    # заранее: «найди, где это, и поправь там» — законный план, и
+    # требовать в нём путь до поиска значит требовать знать ответ
+    # до вопроса. Файл в такой шаг подставит узел поиска (pipeline.py).
+    searched = False
+    # Файлы, которые создают предыдущие шаги. Нужны дважды: чтобы не
+    # ругаться «файла нет» на шаг, который его дождётся, и чтобы поймать
+    # лишнюю правку сразу после записи.
+    created: set[str] = set()
+
+    for number, step in enumerate(plan.steps, start=1):
+        if step.action not in PLAN_ACTIONS:
+            problems.append(f"шаг {number}: неизвестное действие {step.action!r}")
+            continue
+        if step.action == SEARCH:
+            searched = True
+
+        if step.action in (READ, EDIT, CREATE) and not step.target:
+            if step.action != CREATE and searched:
+                continue
+            problems.append(f"шаг {number}: действие {step.action} без пути")
+            continue
+        if step.action == SEARCH and not step.target:
+            problems.append(f"шаг {number}: search без запроса")
+            continue
+        if step.action == RUN:
+            command = step.target or step.detail
+            if not command:
+                problems.append(f"шаг {number}: run без команды")
+                continue
+            allowed, reason = guard.command_allowed(command)
+            if not allowed:
+                problems.append(f"шаг {number}: {reason}")
+            continue
+
+        if step.action in (READ, EDIT, CREATE):
+            try:
+                path = guard.resolve_path(step.target)
+            except guard.OutsideWorkspace:
+                problems.append(f"шаг {number}: путь {step.target} вне рабочего каталога")
+                continue
+            if step.action == CREATE:
+                if path.is_file():
+                    problems.append(
+                        f"шаг {number}: файл {step.target} уже есть — create напишет его заново"
+                    )
+                created.add(step.target)
+                continue
+            if step.target in created:
+                # Правка файла, который пишет шаг раньше. Формально
+                # законно — написал скелет, потом дополнил, — а на слабой
+                # модели это почти всегда лишний шаг: она уже вернула
+                # готовое содержимое в create, и edit пишет его во второй
+                # раз. Живой прогон так и удвоил содержимое батника.
+                if step.action == EDIT:
+                    problems.append(
+                        f"шаг {number}: edit {step.target} сразу после его create — "
+                        "скорее всего лишний, файл уже написан целиком"
+                    )
+                continue
+            if step.action in (READ, EDIT) and not path.is_file():
+                problems.append(f"шаг {number}: файла {step.target} нет — для нового нужен create")
+
+    # Дробление маленькой задачи по файлам. Живой прогон: план на
+    # квадратное уравнение развалил его на solve_quadratic.py,
+    # input_coefficients.py, display_roots.py и main.py — файл на функцию.
+    # Формально каждый шаг законен, а вместе они превращают программу
+    # в четыре файла, связанных импортами, и любой сбой в одном роняет
+    # весь прогон. Претензия, а не запрет: несколько модулей бывают
+    # нужны, и решать это человеку.
+    creates = [step.target for step in plan.steps if step.action == CREATE and step.target]
+    code_files = [name for name in creates if not name.rsplit("/", 1)[-1].startswith("test_")]
+    if len(code_files) > 2:
+        problems.append(
+            f"план заводит {len(code_files)} файлов кода ({', '.join(code_files)}) — "
+            "для одной программы обычно хватает одного плюс файл тестов"
+        )
+
+    if plan.steps[-1].action != TEST:
+        problems.append("последний шаг не test: правку, которую нечем проверить, подтверждать нечем")
+
+    return problems
+
+
+def render_plan(plan: Plan, problems: list[str] | None = None) -> str:
+    """План в том виде, в каком его читает человек перед подтверждением.
+
+    Здесь важен не формат, а полнота: человек должен увидеть и шаги,
+    и то, кто их составил, и претензии к ним. План без источника
+    выглядит одинаково убедительно и от модели, и от трёхстрочной
+    запасной заглушки — а это разные основания для «да».
+    """
+    if not plan.steps:
+        return "План пуст."
+
+    where = "запасной план без модели" if plan.source == FROM_FALLBACK else f"модель {plan.model}"
+    head = f"План ({where}, {plan.seconds:.1f} с):"
+    body = "\n".join(f"  {step.line(n)}" for n, step in enumerate(plan.steps, start=1))
+
+    claims = problems if problems is not None else validate_plan(plan)
+    tail = ""
+    if claims:
+        tail = "\n\nПретензии к плану:\n" + "\n".join(f"  ! {c}" for c in claims)
+    return f"{head}\n{body}{tail}"

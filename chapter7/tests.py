@@ -44,8 +44,12 @@ from chapter7.src import checkpoint as checkpoint_module
 from chapter7.src import models as models_module
 from chapter7.src import router as router_module
 from chapter7.src.agents import (
+    CODE_TOOLS,
+    DOCS_TOOLS,
     FALLBACK_ORDER,
+    MEMORY_TOOLS,
     SPECIALISTS,
+    UTILITY_TOOLS,
     Team,
     get_specialist,
     prompt_sizes,
@@ -212,9 +216,18 @@ def call(name: str, **arguments: str) -> str:
 
 class TestOnlyFilter:
     def test_without_only_everything_is_the_same(self):
-        """Главное свойство правки: главы 2-6 не должны заметить её вовсе."""
+        """Главное свойство правки: главы 2-6 не должны заметить её вовсе.
+
+        Промпт Главы 6 сверяется с набором из 16 инструментов, а не
+        с реестром целиком. Разница появилась, когда Глава 8 добавила
+        в общий реестр свои: «весь реестр» перестал означать «то, что
+        видела Глава 6», и тест начал падать при запуске тестов двух
+        глав в одном процессе. Падал он при этом на правду — просто
+        проверял не то свойство, которое собирался.
+        """
         assert selected_tools() == list(TOOL_REGISTRY.keys())
-        assert build_system_prompt() == chapter6_agent.BASE_SYSTEM_PROMPT
+        chapter6_tools = list(CODE_TOOLS) + list(DOCS_TOOLS) + list(MEMORY_TOOLS) + list(UTILITY_TOOLS)
+        assert build_system_prompt(chapter6_tools) == chapter6_agent.BASE_SYSTEM_PROMPT
 
     def test_only_keeps_registry_order(self):
         """Порядок берётся из реестра, а не из списка: промпт не должен
@@ -257,7 +270,10 @@ class TestSpecialistDecorator:
     """
 
     def test_all_five_are_registered(self):
-        assert set(SPECIALISTS) == {"код", "документы", "память", "инструменты", "о себе"}
+        # Вхождение, а не равенство: следующие главы регистрируют своих
+        # специалистов в том же реестре, и требовать «ровно эти пять»
+        # значит запрещать команде расти.
+        assert {"код", "документы", "память", "инструменты", "о себе"} <= set(SPECIALISTS)
 
     def test_the_function_is_returned_unchanged(self):
         """Декоратор возвращает саму функцию, а не обёртку: её зовут тесты."""

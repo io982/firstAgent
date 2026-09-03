@@ -35,6 +35,13 @@ MAX_ITERATIONS = 5
 #   Linux/macOS:  export AGENT_NUM_CTX=8192
 NUM_CTX = int(os.environ.get("AGENT_NUM_CTX", "4096"))
 KEEP_ALIVE = "5m"
+
+# Сколько ждать ответа модели, секунд. Константой, а не числом в вызове,
+# потому что ответы бывают очень разной длины: реплика в диалоге
+# укладывается в секунды, а «напиши файл целиком» — это сотни токенов,
+# и на слабой машине они идут минуты. Глава 8 поднимает этот предел
+# на время такой генерации и возвращает обратно.
+REQUEST_TIMEOUT = 120
 VERBOSE = True
 #VERBOSE = False
 
@@ -281,7 +288,7 @@ def execute_tool(tool_name: str, args: dict) -> str:
     except Exception as e:
         return f"Ошибка выполнения инструмента '{tool_name}': {str(e)}"
 
-def request_model(messages: list, response_format: dict | None = None) -> str:
+def request_model(messages: list, response_format: dict | None = None, options: dict | None = None) -> str:
     """Отправляет запрос к Ollama API и возвращает текст ответа.
 
     response_format — JSON Schema для constrained decoding. Если схема
@@ -296,9 +303,15 @@ def request_model(messages: list, response_format: dict | None = None) -> str:
         "keep_alive": KEEP_ALIVE,
         "options": {"temperature": 0.1, "num_ctx": NUM_CTX}
     }
+    # Настройки сэмплера можно дополнить на один вызов. Нужно это редко,
+    # но по делу: Глава 8 просит модель написать файл целиком и ставит
+    # предел на длину ответа (`num_predict`), потому что генерация без
+    # предела иногда уходит в разгон и упирается в таймаут.
+    if options:
+        payload["options"].update(options)
     if response_format is not None:
         payload["format"] = response_format
-    response = requests.post(OLLAMA_URL, json=payload, timeout=120)
+    response = requests.post(OLLAMA_URL, json=payload, timeout=REQUEST_TIMEOUT)
     response.raise_for_status()
     return response.json()["message"]["content"].strip()
 

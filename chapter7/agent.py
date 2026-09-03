@@ -198,9 +198,13 @@ def prompt_table() -> str:
 # ====================================================================
 
 
-def new_conversation(agent: str, resume: bool = False) -> SelectiveConversation:
-    """Отдельный диалог со своим промптом и своим бюджетом."""
-    spec = Team().get(agent)
+def new_conversation(agent: str, resume: bool = False, team: Team | None = None) -> SelectiveConversation:
+    """Отдельный диалог со своим промптом и своим бюджетом.
+
+    `team` — та же оговорка, что у `team_of()`: команда может быть
+    не общей. Не передали — работает весь реестр, как раньше.
+    """
+    spec = (team or Team()).get(agent)
     return SelectiveConversation(
         system_prompt=spec.system_prompt(),
         max_history_tokens=history_budget(spec, resumed=resume),
@@ -210,9 +214,10 @@ def new_conversation(agent: str, resume: bool = False) -> SelectiveConversation:
     )
 
 
-def new_team_conversations(resume: bool = False) -> dict[str, SelectiveConversation]:
+def new_team_conversations(resume: bool = False, team: Team | None = None) -> dict[str, SelectiveConversation]:
     """По диалогу на каждого специалиста команды."""
-    return {name: new_conversation(name, resume=resume) for name in Team().names()}
+    team = team or Team()
+    return {name: new_conversation(name, resume=resume, team=team) for name in team.names()}
 
 
 # ====================================================================
@@ -529,6 +534,22 @@ def route_shape() -> str:
 # следующий: это работа рёбер, и она вся собрана в build_graph().
 
 
+def team_of(state: State) -> Team:
+    """Команда этого прогона: из состояния, если её туда положили, иначе общая.
+
+    Ради этого Team и заведён отдельным типом — его собственная строка
+    документации говорит: «граф собирается по команде, а не по глобальному
+    словарю». Первая версия это заявляла, но не делала: узлы звали `Team()`
+    без аргументов и всегда получали весь реестр. Расхождение вылезло
+    в Главе 8, где команда собирается из одного специалиста, — и заявление
+    пришлось сделать правдой.
+
+    Умолчание прежнее: не положили команду в состояние — работает весь
+    реестр, и главы 7 и раньше ничего не замечают.
+    """
+    return state.extra.get("team") or Team()
+
+
 def node_route(state: State) -> State:
     """Кто отвечает. Единственный узел, который зовёт маршрутизатор."""
     decision = route(state.user_input)
@@ -548,7 +569,7 @@ def node_handoff(state: State) -> State:
     специалистов — состав команды, и менять его здесь пришлось бы каждый
     раз, когда команда меняется.
     """
-    team = Team()
+    team = team_of(state)
     following = team.next_untried(state.tried)
     if not following:
         return state
@@ -573,7 +594,7 @@ def node_retrieve(state: State) -> State:
     # функция поиска, и специалист по инструментам просто возвращает
     # пустой контекст. Одна ветка вместо двух, и подменяется она в тесте
     # так же, как любая другая.
-    spec = Team().get(state.agent)
+    spec = team_of(state).get(state.agent)
     text, found = spec.search(state.user_input, retrieval_budget(spec))
     state.retrieved = text
     state.extra["found"] = found
@@ -591,7 +612,7 @@ def node_generate(state: State) -> State:
     не едут: там объекты, а не данные. Продолжение прогона поднимет
     разговор из отложенной сессии Главы 3 — тем же способом, что и всегда.
     """
-    spec = Team().get(state.agent)
+    spec = team_of(state).get(state.agent)
     conversations = state.extra.get("conversations") or {}
     conversation = conversations.get(state.agent) or new_conversation(state.agent)
 
@@ -696,7 +717,7 @@ def edge_after_retrieve(state: State) -> str:
     """
     if state.extra.get("found", True):
         return "generate"
-    if Team().next_untried(state.tried):
+    if team_of(state).next_untried(state.tried):
         return "handoff"
     return "generate"
 
