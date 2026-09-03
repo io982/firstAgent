@@ -83,9 +83,15 @@ from chapter8.src import guard
 from chapter8.src import planner as planner_module
 from chapter8.src.edits import describe_forms
 from chapter8.src.env import ENV_TOOLS, env_report
-from chapter8.src.fs import FS_TOOLS
+from chapter8.src.fs import FS_TOOLS, read_lines
 from chapter8.src.pipeline import coder_model, run_pipeline
-from chapter8.src.planner import make_plan, planner_model, render_plan, validate_plan
+from chapter8.src.planner import (
+    make_plan,
+    named_file,
+    planner_model,
+    render_plan,
+    validate_plan,
+)
 from chapter8.src.session import SessionMemory
 from chapter8.src.shell import RUN_TOOLS
 from chapter8.src.vcs import GIT_TOOLS, current_branch, is_repo
@@ -149,11 +155,14 @@ TASK_MARKERS = (
     # написать с нуля
     "напиш", "созда", "сдела", "реализ", "сгенерир", "наброса",
     # поправить существующее
-    # «испарв» — не опечатка в коде, а опечатка ЧЕЛОВЕКА, которую
-    # видели живьём. Основа стоит рядом с правильной намеренно: цена
+    # «испарв» и «справь» — не опечатки в коде, а опечатки ЧЕЛОВЕКА,
+    # обе видены живьём («испарвь сложение», «проанализируй и справь
+    # все ошибки»). Основы стоят рядом с правильной намеренно: цена
     # промаха здесь несимметрична — лишняя основа ловит опечатку,
-    # а её отсутствие отправляет задачу отвечать текстом.
-    "поправ", "почин", "исправ", "испарв", "измен", "перепиш",
+    # а её отсутствие отправляет задачу отвечать текстом. «Справь»
+    # с мягким знаком не задевает ни «справку», ни «справочник»:
+    # у тех основы другие.
+    "поправ", "почин", "исправ", "испарв", "справь", "измен", "перепиш",
     "переимен", "отрефактор", "добав", "удал", "дополн", "допиш",
     # запустить и проверить
     "запуст", "прогон", "проверь линтером", "покрой тестами",
@@ -183,7 +192,13 @@ NOT_A_TASK = (
 CODER_NAME = "код"
 
 
-def retrieve_workspace(user_input: str, budget: int) -> Retrieval:  # noqa: ARG001
+# Сколько строк названного файла показывать в ответе на ВОПРОС.
+# Меньше, чем при правке: там файл нужен целиком, чтобы попасть якорем,
+# здесь — чтобы было о чём говорить.
+QUESTION_LINES = 200
+
+
+def retrieve_workspace(user_input: str, budget: int) -> Retrieval:
     """Кладёт в контекст состояние рабочего каталога, а не фрагменты кода.
 
     У специалистов Главы 7 контекст — выдержки из текста, найденные
@@ -212,6 +227,19 @@ def retrieve_workspace(user_input: str, budget: int) -> Retrieval:  # noqa: ARG0
     changed = guard.changed_files()
     if changed:
         lines.append("Агент уже менял в этой сессии: " + ", ".join(guard.relative(p) for p in changed))
+
+    # Файл, названный в вопросе, кладётся В КОНТЕКСТ, если он лежит
+    # в рабочем каталоге. Без этого вопрос про свой же файл отвечать
+    # нечем: поиск Главы 5 ищет по индексу КУРСА, а рабочий каталог
+    # человека в этот индекс не входит и входить не должен. Живой
+    # прогон: «проанализируй quadratic.py и исправь ошибки» получило
+    # ответ «предоставьте мне содержимое файла» — исполнитель был прав,
+    # содержимого у него и правда не было.
+    named = named_file(user_input)
+    if named:
+        text = read_lines(named, "1", str(QUESTION_LINES))
+        if not text.startswith(("Нет такого файла", "Файл не читается")):
+            lines.append(f"Файл, о котором спрашивают:\n{text}")
 
     return "\n".join(lines)[: budget * 4], True
 

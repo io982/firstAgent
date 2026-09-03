@@ -1164,6 +1164,13 @@ def node_verify(state: State) -> State:
             return state
 
         limit = max(guard.get_policy().timeout, 60.0)
+        # Признаком «программу и правда запускали» служит флаг, а не
+        # поиск слова в человеческом описании проверки. Первая версия
+        # спрашивала `"запуск" not in verified_by` — и молча ломалась
+        # о строку «программа ждёт ввода, ЗАПУСКАТЬ её нечем»: подстрока
+        # нашлась там, где смысл был обратный. Ровно та ошибка, о которой
+        # глава предупреждает в другом месте.
+        executed = False
         if wants_scaffold(state.user_input):
             # Каркас проверяется РАЗБОРОМ, и ничем сильнее.
             #
@@ -1200,6 +1207,7 @@ def node_verify(state: State) -> State:
             # и `run_lint`, и там оно записано в shell.py.
             run = execute([interpreter(), entry], timeout=limit)
             state.extra["verified_by"] = f"запуск {entry}"
+            executed = True
         green = run.ok
 
         # Программу, которую нельзя запустить, мы проверили импортом
@@ -1214,7 +1222,7 @@ def node_verify(state: State) -> State:
         # разбор областей видимости — работа линтера, и писать второй
         # линтер в учебной главе значит писать его с ошибками. Нет
         # линтера — нет и проверки, глава от этого не ломается.
-        if green and "запуск" not in state.extra["verified_by"]:
+        if green and not executed:
             unknown = undefined_names(entry)
             if unknown:
                 green = False

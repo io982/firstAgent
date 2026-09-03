@@ -100,6 +100,7 @@ from chapter8.src.shell import (
     first_error,
     interpreter,
     suite_passed,
+    undefined_names,
 )
 from chapter8.src.vcs import GIT_TOOLS, current_branch, git_commit, git_diff, git_log, git_status
 
@@ -2449,6 +2450,19 @@ class TestStrayDefinitions:
         assert stray_definitions("app.py", self.BEFORE, written) == []
         assert "def derivative" in written
 
+    def test_перезапись_целиком_со_сдвигом_чинится(self, workspace):
+        """Живой прогон: «исправь все ошибки» вернуло файл, сдвинутый вправо.
+
+        Правка отменялась с «строка 1: unexpected indent» — а отменять
+        то, что чинится одним dedent, значит терять работу
+        на форматировании.
+        """
+        before = "def f():" + chr(10) + "    return 1" + chr(10)
+        (workspace / "app.py").write_text(before, encoding="utf-8")
+        answer = write_file("app.py", "    def f():" + chr(10) + "        return 2" + chr(10))
+        assert "снят лишний отступ" in answer
+        assert (workspace / "app.py").read_text(encoding="utf-8") == "def f():" + chr(10) + "    return 2" + chr(10)
+
     def test_законный_отступ_не_трогают(self, workspace):
         """Дописать строку ВНУТРЬ блока `__main__` — обычное дело."""
         (workspace / "app.py").write_text(self.BEFORE, encoding="utf-8")
@@ -2657,6 +2671,73 @@ class TestPlannedModules:
         state = started(Plan("з", [Step("create", "app.py", "")]), touched=["app.py"])
         pipeline.node_deps(state)
         assert called == ["такогонет"]
+
+
+class TestUndefinedNames:
+    """Программу, которую нельзя запустить, проверяет линтер вместо запуска.
+
+    Живой прогон: правка вернула `return root1, root2, derivative`, где
+    `derivative` не существует. Файл разбирается, импортируется, агент
+    рапортует «Готово» — а запуск падает NameError на первой же строке.
+    Импорт и разбор молчат ровно про то, ради чего программу пишут.
+    """
+
+    BROKEN = (
+        "def solve(a, b, c):\n"
+        "    return a, derivative\n"
+        "\n\n"
+        "def main():\n"
+        "    a = float(input('a: '))\n"
+        "    print(solve(a, 1, 1))\n"
+        "\n\n"
+        "if __name__ == '__main__':\n"
+        "    main()\n"
+    )
+
+    def test_имя_из_ниоткуда_ловится(self, workspace):
+        (workspace / "app.py").write_text(self.BROKEN, encoding="utf-8")
+        assert undefined_names("app.py") == ["derivative"]
+
+    def test_целый_файл_претензий_не_вызывает(self, workspace):
+        (workspace / "app.py").write_text(self.BROKEN.replace(", derivative", ""), encoding="utf-8")
+        assert undefined_names("app.py") == []
+
+    def test_не_python_не_проверяется(self, workspace):
+        (workspace / "run.bat").write_text("@echo off\npython app.py\n", encoding="utf-8")
+        assert undefined_names("run.bat") == []
+
+    def test_проверка_ловит_ненайденное_имя_в_конвейере(self, workspace):
+        (workspace / "app.py").write_text(self.BROKEN, encoding="utf-8")
+        state = started(Plan("з", []), touched=["app.py"])
+        pipeline.node_verify(state)
+
+        assert state.extra["tests_green"] is False
+        assert "derivative" in state.extra["failure"]
+
+    def test_слово_запускать_проверку_не_отменяет(self, workspace):
+        """Проверка стояла на `"запуск" not in verified_by` — и молча ломалась.
+
+        Строка «программа ждёт ввода, ЗАПУСКАТЬ её нечем» содержит
+        подстроку «запуск», а смысл у неё обратный: программу как раз
+        НЕ запускали. Признаком служит флаг, а не поиск слова в тексте,
+        написанном для человека.
+        """
+        (workspace / "app.py").write_text(self.BROKEN, encoding="utf-8")
+        state = started(Plan("з", []), touched=["app.py"])
+        pipeline.node_verify(state)
+        assert "запускать её нечем" in state.extra["verified_by"]
+        assert state.extra["tests_green"] is False
+
+    def test_у_запущенной_программы_линтер_не_спрашивается(self, workspace, monkeypatch):
+        """Запуск — проверка сильнее линтера, и второй раз спрашивать нечего."""
+        (workspace / "app.py").write_text("print(1)\n", encoding="utf-8")
+        monkeypatch.setattr(pipeline, "execute", fake_run(green=True))
+        asked = []
+        monkeypatch.setattr(pipeline, "undefined_names", lambda p: asked.append(p) or ["x"])
+        state = started(Plan("з", []), touched=["app.py"])
+        pipeline.node_verify(state)
+        assert asked == []
+        assert state.extra["tests_green"]
 
 
 class TestVerifyModes:

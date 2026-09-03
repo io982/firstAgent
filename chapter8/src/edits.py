@@ -243,8 +243,20 @@ def apply_full(text: str, content: str) -> EditResult:
     if content == text:
         return EditResult(False, "Правка ничего не меняет: текст совпадает с прежним.", text, FULL)
 
-    was, became = len(text.splitlines()), len(content.splitlines())
     note = ""
+    # Весь файл с лишним отступом слева — беда механическая, и чинится
+    # она так же механически, как у дописывания. Живой прогон:
+    # на «исправь все ошибки» модель вернула файл целиком, сдвинутый
+    # на четыре пробела, и правка отменилась с «строка 1: unexpected
+    # indent». Отменять то, что чинится одним `dedent`, — терять работу
+    # на форматировании.
+    if content[:1].isspace() and not syntax_ok("x.py", content)[0]:
+        flat = textwrap.dedent(content)
+        if syntax_ok("x.py", flat)[0]:
+            content = flat
+            note = " (снят лишний отступ у всего файла)"
+
+    was, became = len(text.splitlines()), len(content.splitlines())
     if was >= 20 and became < was * 0.5:
         note = (
             f" ВНИМАНИЕ: было {was} строк, стало {became} — "
