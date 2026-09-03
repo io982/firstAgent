@@ -55,6 +55,7 @@ from chapter8.src.edits import (
     lost_definitions,
     missing_fields,
     same_code,
+    stray_definitions,
     syntax_ok,
     unified,
     without_docstring,
@@ -2028,8 +2029,27 @@ class TestStepCreate:
         pipeline.node_step(state)
         pipeline.node_step(state)
         second = model.seen[1][-1]["content"]
-        assert "СПРАВКА, уже написанные файлы" in second
+        assert "СПРАВКА, файлы проекта" in second
         assert "def add(a, b):" in second
+
+    def test_проект_виден_даже_когда_прогон_ещё_ничего_не_писал(self, workspace, monkeypatch):
+        """Живой прогон: «напиши батник для запуска» дал `python test_run.py`.
+
+        Каталог был не пуст — в нём лежал готовый quadratic.py, — но
+        прогон начинался с нуля, справка отдавала пустоту, и модель
+        взяла имя из ниоткуда. Спрашивать «что запускать» было не у кого:
+        в задаче не было ни одного имени файла.
+        """
+        (workspace / "quadratic.py").write_text(
+            "def solve(a):" + chr(10) + "    return a" + chr(10), encoding="utf-8")
+        model = fake_model([file_answer("@echo off" + chr(10) + "python quadratic.py" + chr(10))])
+        monkeypatch.setattr(pipeline, "request_model", model)
+        state = started(Plan("напиши батник", [Step("create", "run.bat", "батник")]))
+        pipeline.node_step(state)
+
+        asked = model.seen[0][-1]["content"]
+        assert "quadratic.py" in asked, "имя файла надо откуда-то взять"
+        assert "Главный файл программы: quadratic.py" in asked
 
 
 class TestSkeleton:
@@ -2366,6 +2386,60 @@ class TestScaffoldAsked:
         assert state.extra["tests_green"] is True
         assert "разбор" in state.extra["verified_by"]
         assert any("py_compile" in " ".join(command) for command in seen)
+
+
+class TestStrayDefinitions:
+    """Определение, уехавшее внутрь чужого блока, — работа без работы.
+
+    Живой прогон: на «добавь вывод производной» модель ответила формой
+    `append`, а тело начала с четырёх пробелов — и `def` приехал внутрь
+    блока `except`, стоявшего в конце файла. Файл разбирается, проверка
+    импортом проходит, агент рапортует «Готово». А функция объявляется
+    только при ошибке ввода и не вызывается никогда.
+    """
+
+    BEFORE = (
+        "def solve(a):\n"
+        "    return a\n"
+        "\n\n"
+        "if __name__ == '__main__':\n"
+        "    try:\n"
+        "        print(solve(1))\n"
+        "    except ValueError:\n"
+        "        print('ошибка')\n"
+    )
+
+    def test_определение_внутри_except_видно(self):
+        after = self.BEFORE + "\n    def derivative(a, b):\n        return 2*a\n"
+        assert stray_definitions("a.py", self.BEFORE, after) == ["derivative"]
+
+    def test_на_своём_уровне_претензий_нет(self):
+        after = self.BEFORE + "\n\ndef derivative(a, b):\n    return 2*a\n"
+        assert stray_definitions("a.py", self.BEFORE, after) == []
+
+    def test_замыкание_это_законно(self):
+        after = self.BEFORE + "\n\ndef outer():\n    def inner():\n        return 1\n    return inner\n"
+        assert stray_definitions("a.py", self.BEFORE, after) == []
+
+    def test_метод_класса_это_законно(self):
+        after = self.BEFORE + "\n\nclass Solver:\n    def run(self):\n        return 1\n"
+        assert stray_definitions("a.py", self.BEFORE, after) == []
+
+    def test_чужое_прошлое_не_наша_вина(self):
+        """Такое могло лежать в файле и до нас: запрещать его — запрещать правку."""
+        before = "if True:\n    def f():\n        return 1\n"
+        assert stray_definitions("a.py", before, before + "\nx = 1\n") == []
+
+    def test_новый_файл_не_проверяется(self):
+        """У нового файла всё новое, и `try/except ImportError` там законен."""
+        after = "try:\n    import json\nexcept ImportError:\n    def json():\n        return None\n"
+        assert stray_definitions("a.py", "", after) == []
+
+    def test_правка_отменяется_и_файл_цел(self, workspace):
+        (workspace / "app.py").write_text(self.BEFORE, encoding="utf-8")
+        answer = append_to_file("app.py", "    def derivative(a, b):\n        return 2*a\n")
+        assert "ВНУТРИ чужого блока" in answer
+        assert (workspace / "app.py").read_text(encoding="utf-8") == self.BEFORE
 
 
 class TestSameCode:

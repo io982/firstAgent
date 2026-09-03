@@ -99,6 +99,8 @@ from chapter8.src.planner import (
     TEST,
     Plan,
     make_plan,
+    project_listing,
+    recent_file,
     render_plan,
     validate_plan,
     wants_scaffold,
@@ -850,10 +852,19 @@ def _neighbours(state: State) -> str:
     в запросе, и без явной пометки он читается как образец для ответа.
     """
     touched = state.extra.get("touched", [])
-    if not touched:
-        return ""
-    parts = ["СПРАВКА, уже написанные файлы проекта (переписывать их не надо):"]
-    for path in touched[-3:]:
+    parts = ["СПРАВКА, файлы проекта (переписывать их не надо):"]
+
+    listing = ", ".join(project_listing()) or "(пусто)"
+    parts.append(f"Файлы в каталоге: {listing}")
+    entry = recent_file()
+    if entry:
+        parts.append(f"Главный файл программы: {entry}")
+
+    # Содержимое показываем только у тех, что писали в этом прогоне,
+    # а если таких нет — у главного файла. Показать всё значило бы
+    # выдавить задачу из окна, показать ничего — то, с чего начали.
+    shown = touched[-3:] or ([entry] if entry else [])
+    for path in shown:
         parts.append(f"--- {path} ---\n{read_lines(path, '1', str(NEIGHBOUR_LINES))}")
     return "\n".join(parts) + "\n\n"
 

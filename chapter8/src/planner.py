@@ -563,6 +563,19 @@ def remembered_file() -> str:
     return guard.relative(path) if path.is_file() else ""
 
 
+def project_listing(limit: int = 12) -> list[str]:
+    """Имена файлов проекта — коротко, для справки в запросе к модели.
+
+    Только имена, без содержимого: справка отвечает на вопрос «что
+    вообще есть», а не «что там написано». Задача «напиши батник
+    для запуска» решается одним именем из этого списка.
+    """
+    root = guard.get_workspace()
+    names = [guard.relative(p) for p in sorted(root.rglob("*"))
+             if p.is_file() and p.suffix in CODE_SUFFIXES]
+    return names[:limit]
+
+
 def edit_address(task: str) -> str:
     """Как адресовать правку, когда файл не назван: цитатой или последним файлом.
 

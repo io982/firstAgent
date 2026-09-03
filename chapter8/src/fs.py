@@ -36,6 +36,7 @@ from chapter8.src.edits import (
     apply_full,
     apply_lines,
     lost_definitions,
+    stray_definitions,
     syntax_ok,
     unified,
 )
@@ -111,6 +112,15 @@ def _commit(path: Path, before: str, after: str, action: str, replace: bool = Fa
         return (
             f"Правка отменена: после неё файл перестаёт разбираться ({problem}). "
             "Файл на диске не тронут."
+        )
+
+    stray = stray_definitions(path.name, before, after)
+    if stray and not replace:
+        return (
+            f"Правка отменена: определения {', '.join(stray)} оказались ВНУТРИ чужого блока "
+            "(if/try/for/while), а не на своём уровне. Скорее всего сбит отступ: "
+            "в конце файла лежит вложенный блок, и дописанное приклеилось к нему. "
+            "Поставьте определение с нулевым отступом. Файл на диске не тронут."
         )
 
     lost = lost_definitions(path.name, before, after)

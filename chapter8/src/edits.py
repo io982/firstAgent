@@ -372,6 +372,55 @@ def filled_bodies(path: str, text: str) -> list[str]:
     return filled
 
 
+def stray_definitions(path: str, before: str, after: str) -> list[str]:
+    """Новые определения, которые правка засунула внутрь чужого блока.
+
+    Живой прогон: на «добавь вывод производной» модель ответила формой
+    `append`, а тело начала с четырёх пробелов — и `def` приехал внутрь
+    блока `except`, стоявшего в конце файла. Файл разбирается, проверка
+    импортом проходит, агент рапортует «Готово». А функция объявляется
+    только при ошибке ввода и не вызывается никогда: работы нет, есть
+    её видимость.
+
+    Определение внутри `def` или `class` — законное дело: это замыкание
+    или метод. Внутри `if`, `try`, `for`, `while`, `with` — почти всегда
+    промах отступа, и уж точно промах, когда его туда ДОПИСАЛИ.
+
+    Сравнение с `before` обязательно: в чужом коде такие определения
+    могли лежать и до нас, и отменять из-за них правку значит запретить
+    трогать файл, который мы не писали.
+    """
+    if not path.endswith(".py") or not before.strip():
+        return []
+    try:
+        old = ast.parse(before)
+        new = ast.parse(after)
+    except (SyntaxError, ValueError):
+        return []
+
+    known = _nested_names(old)
+    return [name for name in _nested_names(new) if name not in known]
+
+
+def _nested_names(tree: ast.AST) -> list[str]:
+    """Имена определений, лежащих внутри блока, который не def и не class."""
+    found: list[str] = []
+
+    def walk(node: ast.AST, inside_block: bool) -> None:
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                if inside_block:
+                    found.append(child.name)
+                walk(child, False)
+            else:
+                walk(child, inside_block or isinstance(
+                    child, (ast.If, ast.Try, ast.For, ast.AsyncFor, ast.While, ast.With, ast.AsyncWith)
+                ))
+
+    walk(tree, False)
+    return found
+
+
 def same_code(before: str, after: str) -> bool:
     """Отличаются ли два текста чем-нибудь, кроме пустых строк.
 
