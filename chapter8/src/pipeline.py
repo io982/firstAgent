@@ -65,7 +65,7 @@ import chapter1.agent as base
 from chapter1.agent import request_model
 from chapter7.src.graph import END, Graph, State
 from chapter7.src.models import using_model
-from chapter8.src import env, guard
+from chapter8.src import codemap, env, guard
 from chapter8.src.edits import (
     ANCHOR,
     ANCHOR_MISSED,
@@ -564,7 +564,24 @@ def _run_step(step, state: State) -> tuple[bool, str]:
 
 
 def _step_search(step, state: State) -> tuple[bool, str]:
-    """Находит файл: по имени, если это путь, иначе поиском по тексту."""
+    """Находит МЕСТО правки: файл, а по возможности и функцию внутри него.
+
+    Три способа, от точного к догадке:
+
+      1. в шаге плана стоит путь — работаем с этим файлом;
+      2. поиск по тексту — если человек процитировал свой код;
+      3. выбор по карте функций — если цитаты не было.
+
+    Третий появился последним и закрывает случай, на котором ломались
+    первые два: «сделай чтобы приложение выводило ещё и производную».
+    Ни пути, ни цитаты; искать нечего. По карте же модель выбирает
+    из списка функций с назначением каждой, а `enum` не даёт ей назвать
+    несуществующую.
+
+    Найденная функция кладётся в состояние отдельно от файла: шаг
+    правки, зная её границы, может показать модели одно определение
+    вместо файла и заменить его целиком по строкам.
+    """
     target = step.target.strip()
     if not target:
         return False, "нечего искать: пустой запрос"
@@ -583,10 +600,32 @@ def _step_search(step, state: State) -> tuple[bool, str]:
 
     found = search_files(target, "*.py")
     path = _first_path(found)
-    if not path:
-        return False, f"по запросу {target!r} ничего не нашлось"
-    state.extra["path"] = path
-    return True, f"найден {path}"
+    if path:
+        state.extra["path"] = path
+        _remember_place(state, codemap.choose(state.user_input, path))
+        return True, f"найден {path}"
+
+    # Цитаты в проекте нет — спрашиваем карту. Решение «правка или
+    # новый файл» здесь уже принято планом, поэтому у модели остаётся
+    # ровно один вопрос: какая из этих функций. Замер главы говорит,
+    # что на него она отвечает, а на вопрос «а может, ни одна» — нет.
+    place = codemap.choose(state.user_input)
+    if place:
+        state.extra["path"] = place.path
+        _remember_place(state, place)
+        return True, f"по карте кода: {place.name} в {place.path}"
+    return False, f"по запросу {target!r} ничего не нашлось"
+
+
+def _remember_place(state: State, place) -> None:
+    """Кладёт выбранную функцию в состояние — или убирает прошлую."""
+    if place is None:
+        state.extra.pop("place", None)
+        return
+    state.extra["place"] = {
+        "path": place.path, "name": place.name,
+        "start": place.start, "end": place.end,
+    }
 
 
 def _first_path(search_output: str) -> str:

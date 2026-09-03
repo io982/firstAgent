@@ -104,6 +104,11 @@ from chapter8.src.shell import (
 )
 from chapter8.src.vcs import GIT_TOOLS, current_branch, git_commit, git_diff, git_log, git_status
 
+# Настоящий выбор места: фикстура `workspace` подменяет его заглушкой,
+# чтобы быстрые тесты не ходили к модели, а тестам самого выбора нужен
+# он. Ссылка берётся до первой подмены.
+REAL_CHOOSE = codemap.choose
+
 GIT = shutil.which("git")
 needs_git = pytest.mark.skipif(GIT is None, reason="git не установлен")
 
@@ -140,6 +145,12 @@ def workspace(tmp_path, monkeypatch):
     не проверяет ничего.
     """
     monkeypatch.setenv("AGENT_SESSION_FILE", str(tmp_path / "session.json"))
+    monkeypatch.setenv("AGENT_CODEMAP_FILE", str(tmp_path / "codemap.json"))
+    # Выбор места по карте ходит к модели, а быстрые тесты к ней
+    # не ходят по определению: они должны идти секунды и работать без
+    # запущенной Ollama. Тесты, которым выбор нужен, подменяют его сами.
+    monkeypatch.setattr(codemap, "choose", lambda task, path="": None)
+    codemap.forget_cache()
     guard.set_policy(root=tmp_path, mode=guard.AUTO, dry_run=False)
     return tmp_path
 
@@ -3792,6 +3803,119 @@ class TestPurposes:
         assert tidied.endswith("…")
 
 
+class TestChoosePlace:
+    """Выбор места правки по карте: одно имя из перечисления.
+
+    Ради этого карта и заводилась. Придумать имя модель не может — его
+    нет в грамматике; перепутать файл не может — имя указывает и на файл,
+    и на строки. Остаётся один способ ошибиться: выбрать не ту функцию,
+    и это человек видит в плане до того, как что-то изменится.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _described(self, workspace, monkeypatch):
+        """Настоящий выбор вместо заглушки, и без похода за описаниями.
+
+        Фикстура `workspace` подменяет `choose` пустышкой, чтобы быстрые
+        тесты не ходили к модели. Здесь проверяется он сам, поэтому
+        возвращается настоящий, а модель подделывается ответом.
+
+        `workspace` в аргументах — не ради каталога, а ради ПОРЯДКА:
+        без него автоматическая фикстура отработает раньше, и подмена
+        из `workspace` перекроет нашу.
+        """
+        monkeypatch.setattr(codemap, "choose", REAL_CHOOSE)
+        monkeypatch.setattr(codemap, "describe", lambda items, model=None: 0)
+
+    def test_имя_в_схеме_это_перечисление(self):
+        schema = codemap.choose_schema(["solve", "main"])
+        assert schema["properties"]["name"]["enum"] == ["solve", "main", codemap.NOTHING_FITS]
+
+    def test_ответ_ни_одна_значит_новая_функция(self, mapped, monkeypatch):
+        monkeypatch.setattr(codemap, "request_model",
+                            fake_model([json.dumps({"name": codemap.NOTHING_FITS})]))
+        assert codemap.choose("добавь совсем другое") is None
+
+    def test_выбранная_функция_возвращается_с_границами(self, mapped, monkeypatch):
+        monkeypatch.setattr(codemap, "request_model", fake_model([json.dumps({"name": "solve"})]))
+        place = codemap.choose("поправь корни")
+        assert (place.name, place.path, place.start) == ("solve", "quadratic.py", 4)
+
+    def test_список_можно_сузить_до_файла(self, mapped, monkeypatch):
+        (mapped / "other.py").write_text("def elsewhere():\n    return 1\n", encoding="utf-8")
+        codemap.forget_cache()
+        model = fake_model([json.dumps({"name": "solve"})])
+        monkeypatch.setattr(codemap, "request_model", model)
+        codemap.choose("поправь корни", "quadratic.py")
+
+        asked = model.seen[0][-1]["content"]
+        assert "elsewhere" not in asked, "короткий список модель читает внимательнее"
+
+    def test_классы_в_выбор_не_идут(self, mapped, monkeypatch):
+        """Заменить класс целиком — это не правка, а перезапись файла."""
+        model = fake_model([json.dumps({"name": "solve"})])
+        monkeypatch.setattr(codemap, "request_model", model)
+        codemap.choose("поправь корзину")
+        asked = model.seen[0][-1]["content"]
+        assert "Cart.add" in asked
+        assert "\nquadratic.py:9 Cart " not in asked
+
+    def test_молчание_модели_выбор_не_роняет(self, mapped, monkeypatch):
+        def boom(*a, **k):
+            raise ConnectionError("Ollama молчит")
+
+        monkeypatch.setattr(codemap, "request_model", boom)
+        assert codemap.choose("поправь корни") is None
+
+    def test_пустой_проект_модель_не_беспокоит(self, workspace, monkeypatch):
+        called = []
+        monkeypatch.setattr(codemap, "request_model", lambda *a, **k: called.append(1) or "{}")
+        codemap.forget_cache()
+        assert codemap.choose("поправь что-нибудь") is None
+        assert called == [], "выбирать не из чего — спрашивать не о чем"
+
+
+class TestSearchByMap:
+    """Шаг поиска: путь, потом текст, потом карта."""
+
+    def test_карта_подключается_когда_текста_не_нашлось(self, project, monkeypatch):
+        place = codemap.Definition("calc_mod.py", "add", "a, b", 1, 2, "функция")
+        monkeypatch.setattr(codemap, "choose", lambda task, path="": place)
+        state = started(Plan("з", [Step("search", "такого текста нет нигде", "")]))
+        pipeline.node_step(state)
+
+        assert state.extra["path"] == "calc_mod.py"
+        assert state.extra["place"]["name"] == "add"
+        assert "по карте кода" in state.extra["log"][0]
+
+    def test_карта_молчит_значит_не_нашлось(self, project, monkeypatch):
+        monkeypatch.setattr(codemap, "choose", lambda task, path="": None)
+        state = started(Plan("з", [Step("search", "такого текста нет нигде", "")]))
+        pipeline.node_step(state)
+        assert "ничего не нашлось" in state.extra["log"][0]
+        assert "place" not in state.extra
+
+    def test_найденный_текстом_файл_тоже_уточняется_картой(self, project, monkeypatch):
+        place = codemap.Definition("calc_mod.py", "add", "a, b", 1, 2, "функция")
+        asked = []
+        monkeypatch.setattr(codemap, "choose",
+                            lambda task, path="": asked.append(path) or place)
+        state = started(Plan("з", [Step("search", "def add", "")]))
+        pipeline.node_step(state)
+
+        assert asked == ["calc_mod.py"], "файл известен — сужаем список до него"
+        assert state.extra["place"]["name"] == "add"
+
+    def test_путь_в_шаге_плана_картой_не_проверяют(self, project, monkeypatch):
+        """Человек назвал файл — вопрос «а тот ли это файл» уже решён."""
+        called = []
+        monkeypatch.setattr(codemap, "choose", lambda task, path="": called.append(1) or None)
+        state = started(Plan("з", [Step("search", "calc_mod.py", "")]))
+        pipeline.node_step(state)
+        assert state.extra["path"] == "calc_mod.py"
+        assert called == []
+
+
 # ====================================================================
 # АГЕНТ: ВХОД, ШЕСТОЙ СПЕЦИАЛИСТ, ОТЧЁТ
 # ====================================================================
@@ -4827,6 +4951,112 @@ class TestCoderModels:
         for model, fixed, fixed_spent, scratch, scratch_spent in report:
             print(f"{model:<26}{fixed:>8}/{fix_total:<2}{fixed_spent:>9.0f}"
                   f"{scratch:>8}/{new_total:<2}{scratch_spent:>9.0f}")
+
+        assert report, "замер не собрал ни одной строки"
+
+
+PLACE_MODULE = (
+    "import math\n"
+    "\n\n"
+    "def get_roots(a, b, c):\n"
+    "    d = b*b - 4*a*c\n"
+    "    if d < 0:\n"
+    "        return None\n"
+    "    return ((-b + math.sqrt(d))/(2*a), (-b - math.sqrt(d))/(2*a))\n"
+    "\n\n"
+    "def main():\n"
+    "    a = float(input('a: '))\n"
+    "    b = float(input('b: '))\n"
+    "    c = float(input('c: '))\n"
+    "    print(get_roots(a, b, c))\n"
+    "    input('Enter')\n"
+    "\n\n"
+    "if __name__ == '__main__':\n"
+    "    main()\n"
+)
+
+# Задачи, где нужная функция В ПРОЕКТЕ ЕСТЬ. Ни одна не называет её
+# по имени: если бы называла, место нашлось бы текстовым поиском
+# и карта была бы не нужна.
+PLACE_TASKS = [
+    ("производная", "сделай чтобы приложение выводило еще и производную", "main"),
+    ("ввод", "программа не спрашивает коэффициент c", "main"),
+    ("дискриминант", "неверно считается дискриминант", "get_roots"),
+    ("ожидание", "окно закрывается сразу после вывода ответа", "main"),
+]
+
+# Задачи, где менять нечего: нужна новая функция или дело вообще
+# не в коде. Правильный ответ — «ни одна не подходит».
+NO_PLACE_TASKS = [
+    ("сохранение", "добавь функцию сохранения результата в файл"),
+    ("README", "исправь опечатку в README"),
+]
+
+
+@pytest.mark.slow
+class TestPlaceChoice:
+    """Замер 8: умеет ли модель выбрать МЕСТО правки по карте функций.
+
+    Вопрос замера: заменяет ли выбор из списка текстовый поиск. Поиск
+    находит место, только если человек процитировал свой код; стоит ему
+    сказать по-человечески — «сделай чтобы приложение выводило ещё
+    и производную», — и искать нечего. Карта даёт другой способ:
+    показать список функций с назначением каждой и попросить выбрать
+    одну, а `enum` не даст назвать несуществующую.
+
+    Мерятся ДВЕ разные способности, и это главное в замере:
+
+      * выбрать нужную функцию, когда она есть;
+      * сказать «ни одна не подходит», когда её нет.
+
+    Смешивать их в одно число нельзя. Первая — выбор из списка, вторая —
+    отказ от выбора, и модели на 3B даются они совершенно по-разному.
+    От второй зависит, можно ли доверить модели решение «правка или
+    новый файл»; от первой — можно ли вообще заменить поиск картой.
+    """
+
+    ROUNDS = 2
+
+    def test_выбор_места_на_моделях(self, tmp_path, warm_model, monkeypatch):
+        installed = set(base.list_installed_models())
+        models = [m for m in CODER_CANDIDATES if m in installed]
+        if not models:
+            pytest.skip(f"ни одна из моделей {CODER_CANDIDATES} не установлена")
+
+        root = tmp_path / "проект"
+        root.mkdir()
+        (root / "quadratic.py").write_text(PLACE_MODULE, encoding="utf-8")
+        monkeypatch.setenv("AGENT_CODEMAP_FILE", str(tmp_path / "codemap.json"))
+        guard.set_policy(root=root, mode=guard.AUTO, dry_run=False)
+
+        report = []
+        for model in models:
+            hit = refused = 0
+            spent = 0.0
+            with using_model(model):
+                for _, (_, task, expected) in rounds(self.ROUNDS, PLACE_TASKS):
+                    codemap.forget_cache()
+                    started_at = time.monotonic()
+                    place = codemap.choose(task)
+                    spent += time.monotonic() - started_at
+                    hit += bool(place and place.name == expected)
+                for _, (_, task) in rounds(self.ROUNDS, NO_PLACE_TASKS):
+                    codemap.forget_cache()
+                    started_at = time.monotonic()
+                    place = codemap.choose(task)
+                    spent += time.monotonic() - started_at
+                    refused += place is None
+            report.append((model, hit, refused, spent))
+
+        found_total = len(PLACE_TASKS) * self.ROUNDS
+        none_total = len(NO_PLACE_TASKS) * self.ROUNDS
+        print("\n\nЗАМЕР 8: выбор места правки по карте функций")
+        print(f"Задач с местом: {len(PLACE_TASKS)}, без места: {len(NO_PLACE_TASKS)}, "
+              f"прогонов каждой: {self.ROUNDS}")
+        print(f"{'модель':<26}{'нашёл нужную':>15}{'сказал «ни одна»':>20}{'секунд':>10}")
+        for model, hit, refused, spent in report:
+            print(f"{model:<26}{hit:>12}/{found_total:<2}"
+                  f"{refused:>17}/{none_total:<2}{spent:>10.1f}")
 
         assert report, "замер не собрал ни одной строки"
 
