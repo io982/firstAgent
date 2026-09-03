@@ -34,7 +34,7 @@ from chapter7.src.agents import SPECIALISTS, Team
 from chapter7.src.graph import State
 from chapter7.src.models import using_model
 from chapter8.agent import handle
-from chapter8.src import codemap, env, guard, pipeline, pipeline_lg
+from chapter8.src import codemap, env, guard, pipeline, pipeline_lg, review
 from chapter8.src import planner as planner_module
 from chapter8.src.edits import (
     ANCHOR,
@@ -108,6 +108,7 @@ from chapter8.src.vcs import GIT_TOOLS, current_branch, git_commit, git_diff, gi
 # чтобы быстрые тесты не ходили к модели, а тестам самого выбора нужен
 # он. Ссылка берётся до первой подмены.
 REAL_CHOOSE = codemap.choose
+REAL_REVIEW = review.review
 
 GIT = shutil.which("git")
 needs_git = pytest.mark.skipif(GIT is None, reason="git не установлен")
@@ -150,6 +151,7 @@ def workspace(tmp_path, monkeypatch):
     # не ходят по определению: они должны идти секунды и работать без
     # запущенной Ollama. Тесты, которым выбор нужен, подменяют его сами.
     monkeypatch.setattr(codemap, "choose", lambda task, path="": None)
+    monkeypatch.setattr(review, "review", lambda task, path, model_call=None: (True, []))
     codemap.forget_cache()
     guard.set_policy(root=tmp_path, mode=guard.AUTO, dry_run=False)
     return tmp_path
@@ -3875,6 +3877,138 @@ class TestChoosePlace:
         assert called == [], "выбирать не из чего — спрашивать не о чем"
 
 
+class TestReview:
+    """Разбор написанного: сделано ли то, о чём просили.
+
+    Единственная проверка конвейера, где спрашивают модель. Все
+    остальные механические и отвечают на вопрос «работает ли»;
+    ни одна не отвечает на вопрос «то ли это». А проваливается агент
+    чаще всего именно там: функция объявлена, файл импортируется, тесты
+    зелёные — и производная, которую просили печатать, не печатается.
+    """
+
+    MODULE = "def solve(a):\n    return a * 2\n\n\nprint(solve(2))\n"
+
+    @pytest.fixture
+    def written(self, workspace, monkeypatch):
+        """Настоящий разбор вместо заглушки из `workspace`, и файл под него.
+
+        `workspace` в аргументах не только ради каталога, но и ради
+        порядка: он подменяет разбор пустышкой, чтобы быстрые тесты
+        не ходили к модели, а здесь проверяется он сам.
+        """
+        monkeypatch.setattr(review, "review", REAL_REVIEW)
+        (workspace / "app.py").write_text(self.MODULE, encoding="utf-8")
+        return workspace
+
+    def answer(self, done, problems):
+        return lambda messages, response_format=None: json.dumps(
+            {"done": done, "problems": problems})
+
+    def test_всё_сделано_значит_претензий_нет(self, written):
+        done, problems = review.review("посчитай удвоение", "app.py",
+                                       self.answer(True, []))
+        assert (done, problems) == (True, [])
+
+    def test_претензия_с_настоящей_цитатой_принимается(self, written):
+        done, problems = review.review("выведи ещё и квадрат", "app.py", self.answer(
+            False, [{"quote": "print(solve(2))", "what": "квадрат не печатается",
+                     "how": "добавить второй print"}]))
+        assert done is False
+        assert problems[0].what == "квадрат не печатается"
+
+    def test_выдуманная_цитата_выбрасывается(self, written):
+        """Модель на 3B охотно выдумывает проблемы, если её о них спросить."""
+        done, problems = review.review("выведи квадрат", "app.py", self.answer(
+            False, [{"quote": "print(квадрат)", "what": "нет квадрата"}]))
+        assert (done, problems) == (True, []), "нечего предъявить — значит, нечего чинить"
+
+    def test_отступ_и_пробелы_цитате_не_мешают(self, written):
+        done, problems = review.review("з", "app.py", self.answer(
+            False, [{"quote": "  return a * 2  ", "what": "удвоение вместо квадрата"}]))
+        assert len(problems) == 1
+
+    def test_претензий_больше_трёх_не_берут(self, written):
+        raw = [{"quote": "return a * 2", "what": f"беда {n}"} for n in range(6)]
+        _, problems = review.review("з", "app.py", self.answer(False, raw))
+        assert len(problems) == review.MAX_PROBLEMS
+
+    def test_молчание_модели_прогон_не_краснит(self, written):
+        def boom(*a, **k):
+            raise ConnectionError("Ollama молчит")
+
+        assert review.review("з", "app.py", boom) == (True, [])
+
+    def test_пустой_файл_разбирать_нечего(self, workspace):
+        (workspace / "empty.py").write_text("", encoding="utf-8")
+        assert review.review("з", "empty.py", self.answer(False, [])) == (True, [])
+
+    def test_схема_требует_оба_поля(self):
+        schema = review.review_schema()
+        assert set(schema["required"]) == {"done", "problems"}
+        assert schema["properties"]["problems"]["maxItems"] == review.MAX_PROBLEMS
+
+
+class TestDoubt:
+    """Что конвейер делает с мнением модели: один круг починки и отчёт.
+
+    Механическая проверка говорит о факте, разбор — о мнении, и цена
+    ошибки у них разная. Красные тесты — повод вернуть файлы как было;
+    «мне кажется, задача не выполнена» — повод сказать об этом человеку.
+    Работу, прошедшую все механические проверки, из-за мнения не удаляют.
+    """
+
+    def test_сомнение_даёт_круг_починки(self, workspace):
+        state = started(Plan("з", []), tests_green=True, doubt="- квадрат не печатается")
+        assert pipeline.edge_after_verify(state) == "read"
+        assert state.extra["failure"] == "- квадрат не печатается"
+
+    def test_второго_круга_по_тому_же_поводу_нет(self, workspace):
+        state = started(Plan("з", []), tests_green=True,
+                        doubt="- квадрат не печатается", doubted=True)
+        assert pipeline.edge_after_verify(state) == "done"
+
+    def test_сомнение_не_откатывает(self, workspace, monkeypatch):
+        """Зелёная проверка плюс мнение — это не повод удалять файлы."""
+        (workspace / "app.py").write_text("print(1)\n", encoding="utf-8")
+        monkeypatch.setattr(pipeline, "execute", fake_run(green=True))
+        monkeypatch.setattr(review, "REVIEW", "on")
+        monkeypatch.setattr(review, "review",
+                            lambda task, path, model_call=None: (False, [review.Problem("print(1)", "не то")]))
+        state = started(Plan("з", []), touched=["app.py"])
+        pipeline.node_verify(state)
+
+        assert state.extra["tests_green"] is True, "механические проверки прошли"
+        assert "не то" in state.extra["doubt"]
+
+    def test_итог_говорит_о_сомнении(self, workspace):
+        state = started(Plan("з", []), tests_green=True, verified_by="запуск app.py",
+                        doubt="- квадрат не печатается", doubted=True)
+        pipeline.node_done(state)
+        assert "СДЕЛАНО, ПОХОЖЕ, НЕ ТО" in state.answer
+        assert "квадрат не печатается" in state.answer
+        assert "Файлы на месте" in state.answer
+
+    def test_снятое_сомнение_в_итог_не_попадает(self, workspace):
+        state = started(Plan("з", []), tests_green=True, verified_by="запуск app.py", doubt="")
+        pipeline.node_done(state)
+        assert state.answer.startswith("Готово.")
+
+    def test_по_умолчанию_разбор_выключен(self):
+        """Решение замера 9: на 3B он не ловит ничего, а время тратит."""
+        assert review.REVIEW == "off"
+
+    def test_разбор_выключается_переключателем(self, workspace, monkeypatch):
+        (workspace / "app.py").write_text("print(1)\n", encoding="utf-8")
+        monkeypatch.setattr(pipeline, "execute", fake_run(green=True))
+        monkeypatch.setattr(review, "REVIEW", "off")
+        called = []
+        monkeypatch.setattr(review, "review", lambda *a, **k: called.append(1) or (True, []))
+        state = started(Plan("з", []), touched=["app.py"])
+        pipeline.node_verify(state)
+        assert called == []
+
+
 class TestEditFunction:
     """Правка ОДНОЙ функции по её границам — форма, у которой нет адреса.
 
@@ -5152,6 +5286,112 @@ class TestPlaceChoice:
         for model, hit, refused, spent in report:
             print(f"{model:<26}{hit:>12}/{found_total:<2}"
                   f"{refused:>17}/{none_total:<2}{spent:>10.1f}")
+
+        assert report, "замер не собрал ни одной строки"
+
+
+GOOD_DERIVATIVE = (
+    "def get_roots(a, b, c):\n"
+    "    return (a, b, c)\n"
+    "\n\n"
+    "def derivative(a, b):\n"
+    "    return 2*a\n"
+    "\n\n"
+    "def main():\n"
+    "    a = float(input('a: '))\n"
+    "    print('Корни:', get_roots(a, 1, 1))\n"
+    "    print('Производная:', derivative(a, 1))\n"
+)
+
+# Функция есть, но её никто не зовёт — самая частая беда живых прогонов.
+DEAD_DERIVATIVE = GOOD_DERIVATIVE.replace(
+    "    print('Производная:', derivative(a, 1))\n", "")
+
+# Вызов не сходится с определением: TypeError при запуске. Ни одна
+# механическая проверка главы этого не видит — файл разбирается,
+# импортируется, имена определены.
+WRONG_ARITY = GOOD_DERIVATIVE.replace(
+    "print('Производная:', derivative(a, 1))",
+    "print('Производная:', derivative(a, 1, 1))")
+
+# Просят спрашивать три коэффициента, спрашивается один.
+MISSING_INPUT = GOOD_DERIVATIVE
+
+GOOD_WAIT = GOOD_DERIVATIVE + "    input('Нажмите Enter')\n"
+
+# Пары «задача, файл» и ждём ли претензию. Файлы подобраны так, чтобы
+# все механические проверки главы их пропускали: разбираются,
+# импортируются, неопределённых имён нет.
+REVIEW_CASES = [
+    ("мёртвая функция", "выводи корни и производную", DEAD_DERIVATIVE, True),
+    ("вызов не сходится", "выводи корни и производную", WRONG_ARITY, True),
+    ("не спрашивает", "спрашивай у человека все три коэффициента a, b и c",
+     MISSING_INPUT, True),
+    ("не ждёт", "после вывода жди нажатия клавиши, чтобы окно не закрылось",
+     GOOD_DERIVATIVE, True),
+    ("всё на месте", "выводи корни и производную", GOOD_DERIVATIVE, False),
+    ("ждёт как просили", "после вывода жди нажатия клавиши", GOOD_WAIT, False),
+]
+
+
+@pytest.mark.slow
+class TestReviewQuality:
+    """Замер 9: годится ли модель судьёй собственной работы.
+
+    Разбор — единственная проверка конвейера, где спрашивают модель,
+    и заведён он ради вопроса, на который механические проверки
+    не отвечают: «то ли это, о чём просили». Файл разбирается,
+    импортируется, имена определены, тесты зелёные — а производная,
+    которую просили печатать, не печатается.
+
+    Меряются ДВЕ величины, и обе нужны. «Поймал» без «промолчал»
+    ничего не значит: судья, который придирается всегда, ловит все
+    беды и не годится никуда — каждая его претензия отправляет готовую
+    работу на лишний круг починки.
+
+    Файлы подобраны так, чтобы ВСЕ механические проверки главы их
+    пропускали. Иначе замер мерил бы не разбор, а `ruff` и `ast`.
+    """
+
+    ROUNDS = 2
+
+    def test_разбор_на_моделях(self, tmp_path, warm_model, monkeypatch):
+        installed = set(base.list_installed_models())
+        models = [m for m in CODER_CANDIDATES if m in installed]
+        if not models:
+            pytest.skip(f"ни одна из моделей {CODER_CANDIDATES} не установлена")
+
+        monkeypatch.setattr(review, "review", REAL_REVIEW)
+        root = tmp_path / "разбор"
+        root.mkdir()
+        guard.set_policy(root=root, mode=guard.AUTO, dry_run=False)
+
+        bad_total = sum(1 for *_, flag in REVIEW_CASES if flag) * self.ROUNDS
+        good_total = sum(1 for *_, flag in REVIEW_CASES if not flag) * self.ROUNDS
+
+        report = []
+        for model in models:
+            caught = quiet = 0
+            spent = 0.0
+            with using_model(model):
+                for _, (name, task, source, should_flag) in rounds(self.ROUNDS, REVIEW_CASES):
+                    (root / "app.py").write_text(source, encoding="utf-8")
+                    started_at = time.monotonic()
+                    done, problems = review.review(task, "app.py")
+                    spent += time.monotonic() - started_at
+                    flagged = bool(problems) and not done
+                    if should_flag:
+                        caught += flagged
+                    else:
+                        quiet += not flagged
+            report.append((model, caught, quiet, spent))
+
+        print("\n\nЗАМЕР 9: разбор написанного как судья")
+        print(f"Случаев с бедой: {bad_total // self.ROUNDS}, без беды: "
+              f"{good_total // self.ROUNDS}, прогонов каждого: {self.ROUNDS}")
+        print(f"{'модель':<26}{'поймал беду':>14}{'промолчал зря нет':>20}{'секунд':>10}")
+        for model, caught, quiet, spent in report:
+            print(f"{model:<26}{caught:>11}/{bad_total:<2}{quiet:>17}/{good_total:<2}{spent:>10.1f}")
 
         assert report, "замер не собрал ни одной строки"
 

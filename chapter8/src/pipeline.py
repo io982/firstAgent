@@ -66,7 +66,7 @@ import chapter1.agent as base
 from chapter1.agent import request_model
 from chapter7.src.graph import END, Graph, State
 from chapter7.src.models import using_model
-from chapter8.src import codemap, env, guard
+from chapter8.src import codemap, env, guard, review
 from chapter8.src.edits import (
     ANCHOR,
     ANCHOR_MISSED,
@@ -1376,6 +1376,24 @@ def node_verify(state: State) -> State:
                           f"NameError ждёт при запуске: имена не определены — {', '.join(unknown)}",
                           "", run.seconds)
 
+    # Последняя проверка — и единственная, где спрашивают модель.
+    # Всё механическое уже прошло: файл разбирается, определения на
+    # месте, неопределённых имён нет, тесты зелёные. Ни одна из этих
+    # проверок не отвечает на вопрос «то ли это, о чём просили», а
+    # проваливается агент чаще всего именно там.
+    #
+    # Мнение модели НЕ делает прогон красным. Механическая проверка
+    # говорит о факте, разбор — о мнении, и цена ошибки у них разная:
+    # красные тесты — повод вернуть файлы как было, «мне кажется, задача
+    # не выполнена» — повод сказать об этом человеку и дать один круг
+    # починки. Работу, прошедшую все механические проверки, из-за мнения
+    # не удаляют.
+    if green and review.REVIEW == "on":
+        entry = _entry_point(state) or state.extra.get("path", "")
+        if entry:
+            done, problems = review.review(state.user_input, entry)
+            state.extra["doubt"] = "" if done or not problems else review.report(problems)
+
     state.extra["tests_green"] = green
     state.extra["failure"] = "" if green else first_error(run.text())
     state.extra["verify_output"] = clip(run.text(), 800)
@@ -1734,7 +1752,16 @@ def node_done(state: State) -> State:
     if state.extra.get("tests_green") and not failed:
         how = state.extra.get("verified_by", "проверка")
         repairs = f" (починок: {attempts})" if attempts else ""
-        state.answer = f"Готово. Проверено: {how}{repairs}.\n{body}"
+        # Сомнение разбора, пережившее круг починки, не отменяет
+        # «готово», но и молчать о нём нельзя: все механические проверки
+        # прошли, а сделано, похоже, не то. Решать человеку — он один
+        # знает, о чём просил.
+        doubt = state.extra.get("doubt")
+        head = f"Готово. Проверено: {how}{repairs}."
+        if doubt:
+            head = (f"Проверки прошли ({how}{repairs}), но СДЕЛАНО, ПОХОЖЕ, НЕ ТО:\n{doubt}\n"
+                    "Файлы на месте — посмотрите сами.")
+        state.answer = f"{head}\n{body}"
     elif state.extra.get("unverifiable"):
         head = (
             "Сделано, но ПРОВЕРИТЬ НЕЧЕМ: ни тестов, ни запускаемого файла "
@@ -1800,6 +1827,15 @@ def edge_after_verify(state: State) -> str:
     и оно сломано» — разные исходы, и второй из первого не следует.
     """
     if state.extra.get("tests_green"):
+        # Проверки прошли, но разбор говорит, что сделано не то. Один
+        # круг починки такое сомнение стоит: претензии конкретны, они
+        # сверены с файлом, и починка получит их вместо «исправь».
+        # Второго круга не будет и отката тоже: работу, прошедшую все
+        # механические проверки, из-за мнения модели не удаляют.
+        if state.extra.get("doubt") and not state.extra.get("doubted"):
+            state.extra["doubted"] = True
+            state.extra["failure"] = state.extra["doubt"]
+            return READ_NODE
         return DONE
     if state.extra.get("unverifiable"):
         return DONE
