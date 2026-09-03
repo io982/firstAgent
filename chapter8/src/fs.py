@@ -35,10 +35,12 @@ from chapter8.src.edits import (
     apply_append,
     apply_full,
     apply_lines,
+    doubled_main,
     lost_definitions,
     stray_definitions,
     syntax_ok,
     unified,
+    unreachable_code,
 )
 
 # Потолки вывода. В символах и штуках, а не в токенах: считать токены
@@ -133,6 +135,23 @@ def _commit(path: Path, before: str, after: str, action: str, replace: bool = Fa
         )
     if lost:
         warning = f"\n⚠️ Из файла пропадут определения: {', '.join(lost)}\n"
+
+    if doubled_main(path.name, before, after) and not replace:
+        return (
+            "Правка отменена: в файле появился второй блок "
+            "`if __name__ == \"__main__\"`. Он бывает ровно один — иначе "
+            "программа спросит у человека одно и то же дважды. "
+            "Файл на диске не тронут."
+        )
+
+    dead = unreachable_code(path.name, before, after)
+    if dead and not replace:
+        where = "; ".join(dead[:3])
+        return (
+            f"Правка отменена: после неё код «{where}» стоит за return или raise — "
+            "до него выполнение не дойдёт никогда. Поставьте его ПЕРЕД выходом "
+            "из функции. Файл на диске не тронут."
+        )
 
     diff = unified(before, after, guard.relative(path))
     verdict = guard.check(action, warning + (diff or "изменений в тексте нет"))

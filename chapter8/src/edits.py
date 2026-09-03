@@ -460,6 +460,92 @@ def filled_bodies(path: str, text: str) -> list[str]:
     return filled
 
 
+def unreachable_code(path: str, before: str, after: str) -> list[str]:
+    """Строки, до которых выполнение не дойдёт никогда. Только НОВЫЕ.
+
+    Живой прогон: на «добавь, чтобы выводилась ещё производная» модель
+    дописала три строки в конец функции — после `return`. Файл
+    разбирается, запускается, все проверки зелёные, агент отчитывается
+    «Готово». А производная не печатается и не напечатается никогда:
+    до этих строк выполнение не доходит.
+
+    Ищется по разбору: в теле блока после `return`, `raise`, `break`
+    или `continue` не может выполниться ничего. Правило простое
+    и не требует понимания смысла — ровно то, что можно поручить коду.
+
+    Считаются только строки, которых НЕ БЫЛО раньше. Недостижимый код
+    мог лежать в файле и до нас; отменять из-за него правку значит
+    запретить работу с чужим кодом.
+
+    Сравниваются ТЕКСТЫ строк, а не их номера. Номера сдвигает любая
+    вставка выше по файлу, и сравнение по ним объявляло бы новым
+    давно лежавший мёртвый код.
+    """
+    if not path.endswith(".py"):
+        return []
+    was = _unreachable_lines(before)
+    now = _unreachable_lines(after)
+    return [line for line in now if line not in was]
+
+
+def _unreachable_lines(text: str) -> list[str]:
+    """Тексты строк, стоящих после выхода из блока, — во всех телах файла."""
+    try:
+        tree = ast.parse(text)
+    except (SyntaxError, ValueError):
+        return []
+
+    lines = text.splitlines()
+    numbers: set[int] = set()
+    stoppers = (ast.Return, ast.Raise, ast.Break, ast.Continue)
+    for node in ast.walk(tree):
+        for field in ("body", "orelse", "finalbody"):
+            block = getattr(node, field, None)
+            if not isinstance(block, list):
+                continue
+            stopped = False
+            for statement in block:
+                if stopped and isinstance(statement, ast.stmt):
+                    last = getattr(statement, "end_lineno", statement.lineno)
+                    numbers.update(range(statement.lineno, last + 1))
+                if isinstance(statement, stoppers):
+                    stopped = True
+    return [lines[n - 1].strip() for n in sorted(numbers) if 0 < n <= len(lines)]
+
+
+def doubled_main(path: str, before: str, after: str) -> bool:
+    """Появился ли ВТОРОЙ блок `if __name__ == "__main__"`.
+
+    Блок входа в программу бывает ровно один. Второй — всегда промах:
+    программа спрашивает у человека одно и то же дважды и делает работу
+    дважды. Живой прогон: модель, которой показали одну функцию,
+    вернула её вместе со всем блоком `__main__`, а замена по строкам
+    положила это рядом со старым.
+
+    Определением такой блок не является, поэтому `top_definitions`
+    его не видит, — отсюда отдельная проверка.
+    """
+    if not path.endswith(".py"):
+        return False
+    return _main_guards(after) > max(1, _main_guards(before))
+
+
+def _main_guards(text: str) -> int:
+    """Сколько в файле блоков входа в программу."""
+    try:
+        tree = ast.parse(text)
+    except (SyntaxError, ValueError):
+        return 0
+    found = 0
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.If) or not isinstance(node.test, ast.Compare):
+            continue
+        left = node.test.left
+        if isinstance(left, ast.Name) and left.id == "__name__":
+            found += 1
+    return found
+
+
 def same_tree(path: str, before: str, after: str) -> bool:
     """Одинаковы ли два файла для интерпретатора: сравнение по дереву разбора.
 

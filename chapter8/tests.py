@@ -50,6 +50,7 @@ from chapter8.src.edits import (
     apply_lines,
     definitions,
     describe_forms,
+    doubled_main,
     edit_schema,
     filled_bodies,
     lost_definitions,
@@ -59,6 +60,7 @@ from chapter8.src.edits import (
     stray_definitions,
     syntax_ok,
     unified,
+    unreachable_code,
     without_docstring,
 )
 from chapter8.src.env import ENV_TOOLS
@@ -110,6 +112,7 @@ from chapter8.src.vcs import GIT_TOOLS, current_branch, git_commit, git_diff, gi
 # он. Ссылка берётся до первой подмены.
 REAL_CHOOSE = codemap.choose
 REAL_REVIEW = review.review
+REAL_FIND = codemap.find
 
 GIT = shutil.which("git")
 needs_git = pytest.mark.skipif(GIT is None, reason="git не установлен")
@@ -2531,6 +2534,78 @@ class TestImportsOnTop:
         assert (workspace / "app.py").read_text(encoding="utf-8").rstrip().endswith("print('конец')")
 
 
+class TestUnreachable:
+    """Код после return не выполнится никогда, как бы он ни выглядел.
+
+    Живой прогон: на «добавь, чтобы выводилась ещё производная» модель
+    дописала три строки в конец функции — после `return`. Файл
+    разбирается, запускается, все проверки зелёные, агент отчитывается
+    «Готово». А производная не печатается и не напечатается никогда.
+    """
+
+    BEFORE = ("def solve(a):" + chr(10) + "    if a > 0:" + chr(10) +
+              "        return 1" + chr(10) + "    return None" + chr(10))
+
+    def test_код_после_return_виден(self):
+        after = self.BEFORE + "    print(2)" + chr(10)
+        assert unreachable_code("a.py", self.BEFORE, after) == ["print(2)"]
+
+    def test_код_перед_return_законен(self):
+        after = "def solve(a):" + chr(10) + "    print(2)" + chr(10) + "    return 1" + chr(10)
+        assert unreachable_code("a.py", self.BEFORE, after) == []
+
+    def test_чужой_мёртвый_код_не_наша_вина(self):
+        """Он мог лежать в файле и до нас: запрещать из-за него правку нельзя."""
+        old = "def f():" + chr(10) + "    return 1" + chr(10) + "    print(0)" + chr(10)
+        assert unreachable_code("a.py", old, old + chr(10) + "x = 1" + chr(10)) == []
+
+    def test_сдвиг_строк_ложной_тревоги_не_даёт(self):
+        """Сравниваются тексты строк, а не номера: номера двигает любая вставка."""
+        old = "def f():" + chr(10) + "    return 1" + chr(10) + "    print(0)" + chr(10)
+        new = "import os" + chr(10) * 2 + old
+        assert unreachable_code("a.py", old, new) == []
+
+    def test_правка_с_мёртвым_кодом_отменяется(self, workspace):
+        (workspace / "app.py").write_text(self.BEFORE, encoding="utf-8")
+        answer = append_to_file("app.py", "    print(2)" + chr(10))
+        assert "не дойдёт никогда" in answer
+        assert (workspace / "app.py").read_text(encoding="utf-8") == self.BEFORE
+
+    def test_не_python_не_проверяется(self):
+        assert unreachable_code("run.bat", "echo 1", "echo 2") == []
+
+
+class TestDoubledMain:
+    """Блок входа в программу бывает ровно один.
+
+    Живой прогон: модель, которой показали одну функцию, вернула её
+    вместе со всем блоком `__main__`, а замена по строкам положила это
+    рядом со старым. Программа стала спрашивать коэффициенты дважды,
+    и все проверки при этом зелёные: файл разбирается, запускается,
+    подставленного ввода хватает на оба круга.
+    """
+
+    ONE = ("def f():" + chr(10) + "    return 1" + chr(10) * 2 +
+           'if __name__ == "__main__":' + chr(10) + "    f()" + chr(10))
+
+    def test_второй_блок_виден(self):
+        assert doubled_main("a.py", self.ONE, self.ONE + chr(10) + self.ONE)
+
+    def test_один_блок_это_норма(self):
+        assert not doubled_main("a.py", self.ONE, self.ONE + "x = 1" + chr(10))
+
+    def test_чужие_два_блока_не_наша_вина(self):
+        """Так мог выглядеть файл и до нас."""
+        both = self.ONE + self.ONE
+        assert not doubled_main("a.py", both, both + "x = 1" + chr(10))
+
+    def test_правка_со_вторым_блоком_отменяется(self, workspace):
+        (workspace / "app.py").write_text(self.ONE, encoding="utf-8")
+        answer = append_to_file("app.py", self.ONE)
+        assert "второй блок" in answer
+        assert (workspace / "app.py").read_text(encoding="utf-8") == self.ONE
+
+
 class TestSameTree:
     """Комментарий не меняет поведения программы — значит, не чинит её."""
 
@@ -4211,7 +4286,10 @@ class TestEditFunction:
     def project_map(self, workspace, monkeypatch):
         (workspace / "app.py").write_text(self.MODULE, encoding="utf-8")
         codemap.forget_cache()
-        place = codemap.Definition("app.py", "main", "", 7, 8, "функция")
+        # Границы берём из карты, а не пишем руками: рукописные
+        # разъезжаются с файлом при первой же его правке, и тест
+        # начинает проверять не то, что написано в его названии.
+        place = REAL_FIND("main")
         monkeypatch.setattr(codemap, "choose", lambda task, path="": place)
         return workspace
 
