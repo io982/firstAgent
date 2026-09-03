@@ -2353,6 +2353,115 @@ class TestDepsNode:
         assert called == ["requests"]
 
 
+class TestInputAtImport:
+    """Ввод на верхнем уровне модуля против ввода под `if __name__`.
+
+    Разница стоила отката правильно написанного приложения. Проверка
+    «программа ждёт ввода — значит импортируем» опиралась на молчаливое
+    допущение, что интерактив лежит под `__main__`. Модель на 3B этого
+    допущения не разделяет: живой прогон дал файл, где `input()` стоит
+    прямо на верхнем уровне. Импорт такой модуль ВЫПОЛНЯЕТ и падает тем
+    же EOFError, от которого импорт и должен был спасти.
+    """
+
+    GUARDED = (
+        "def solve(a):\n"
+        '    """корни"""\n'
+        "    return a\n"
+        "\n\n"
+        'if __name__ == "__main__":\n'
+        "    a = float(input('a: '))\n"
+        "    print(solve(a))\n"
+    )
+    BARE = (
+        "def solve(a):\n"
+        '    """корни"""\n'
+        "    return a\n"
+        "\n\n"
+        "print('программа о квадратных уравнениях')\n"
+        "a = float(input('a: '))\n"
+        "print(solve(a))\n"
+    )
+
+    def test_под_main_импорт_безопасен(self, workspace):
+        (workspace / "app.py").write_text(self.GUARDED, encoding="utf-8")
+        assert pipeline._waits_for_input("app.py")
+        assert not pipeline.asks_input_on_import("app.py")
+
+    def test_на_верхнем_уровне_импорт_спросит(self, workspace):
+        (workspace / "app.py").write_text(self.BARE, encoding="utf-8")
+        assert pipeline._waits_for_input("app.py")
+        assert pipeline.asks_input_on_import("app.py")
+
+    def test_ввод_внутри_функции_при_импорте_молчит(self, workspace):
+        (workspace / "app.py").write_text(
+            "def ask():\n    return input('a: ')\n", encoding="utf-8")
+        assert not pipeline.asks_input_on_import("app.py")
+
+    def test_имя_переменной_вводом_не_считается(self, workspace):
+        (workspace / "app.py").write_text("user_input = 1\n", encoding="utf-8")
+        assert not pipeline._waits_for_input("app.py")
+        assert not pipeline.asks_input_on_import("app.py")
+
+    def test_такой_файл_проверяется_разбором(self, workspace, monkeypatch):
+        (workspace / "app.py").write_text(self.BARE, encoding="utf-8")
+        seen = []
+
+        def run(command, timeout=None):
+            seen.append(command)
+            return Run(str(command), 0, "", "", 0.1)
+
+        monkeypatch.setattr(pipeline, "execute", run)
+        state = started(Plan("з", []), touched=["app.py"])
+        pipeline.node_verify(state)
+
+        assert state.extra["tests_green"]
+        assert "разбор" in state.extra["verified_by"]
+        assert "py_compile" in " ".join(seen[0])
+
+    def test_под_main_по_прежнему_импортом(self, workspace, monkeypatch):
+        (workspace / "app.py").write_text(self.GUARDED, encoding="utf-8")
+        seen = []
+
+        def run(command, timeout=None):
+            seen.append(command)
+            return Run(str(command), 0, "", "", 0.1)
+
+        monkeypatch.setattr(pipeline, "execute", run)
+        state = started(Plan("з", []), touched=["app.py"])
+        pipeline.node_verify(state)
+
+        assert "импорт" in state.extra["verified_by"]
+        assert "import app" in " ".join(seen[0])
+
+
+class TestPlannedModules:
+    """Свой модуль не ищется в сети, даже если файл не написался."""
+
+    def test_несозданный_модуль_плана_остаётся_своим(self, workspace, monkeypatch):
+        """Живой прогон: create calculator.py провалился, и агент пошёл
+        ставить чужой пакет `calculator` с PyPI. Человек согласился.
+        """
+        (workspace / "test_calculator.py").write_text("import calculator\n", encoding="utf-8")
+        called = []
+        monkeypatch.setattr(pipeline.env, "install", lambda p: called.append(p) or "ok")
+        plan = Plan("з", [Step("create", "calculator.py", ""),
+                          Step("create", "test_calculator.py", "")])
+        state = started(plan, touched=["test_calculator.py"])
+        pipeline.node_deps(state)
+
+        assert called == [], "модуль, который план собирался создать, из сети не ставят"
+        assert state.extra["missing_packages"] == []
+
+    def test_чужой_пакет_по_прежнему_предлагается(self, workspace, monkeypatch):
+        (workspace / "app.py").write_text("import такогонет\n", encoding="utf-8")
+        called = []
+        monkeypatch.setattr(pipeline.env, "install", lambda p: called.append(p) or "ok")
+        state = started(Plan("з", [Step("create", "app.py", "")]), touched=["app.py"])
+        pipeline.node_deps(state)
+        assert called == ["такогонет"]
+
+
 class TestVerifyModes:
     def test_есть_тесты_значит_pytest(self, project, monkeypatch):
         monkeypatch.setattr(pipeline, "execute", fake_run(green=True))

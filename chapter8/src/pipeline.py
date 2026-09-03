@@ -993,6 +993,22 @@ def _step_run(step, state: State) -> tuple[bool, str]:  # noqa: ARG001
     return run.ok, f"код возврата {run.code}; {clip(run.text(), 400) or '(вывода нет)'}"
 
 
+def _planned_modules(state: State) -> set[str]:
+    """Имена модулей, которые план собирался создать.
+
+    Берётся из плана, а не из каталога: файл мог не написаться, и вот
+    тогда это и важно. Модуль, названный в плане, — свой по замыслу,
+    и искать его в сети нельзя ни при каких обстоятельствах.
+    """
+    steps = state.extra.get("plan", {}).get("steps", [])
+    names = set()
+    for step in steps:
+        target = str(step.get("target", "")).strip()
+        if step.get("action") == CREATE and target.endswith(".py"):
+            names.add(target.rsplit("/", 1)[-1][: -len(".py")])
+    return names
+
+
 def node_deps(state: State) -> State:
     """Разбирается с зависимостями написанного кода.
 
@@ -1019,6 +1035,15 @@ def node_deps(state: State) -> State:
         )
         return state
 
+    # Модули, которые ПЛАН собирался создать, своими считаются независимо
+    # от того, лежат ли они на диске. Иначе провалившийся шаг создания
+    # превращает свой же модуль в чужой пакет из сети: живой прогон
+    # на задаче про квадратное уравнение не смог написать `calculator.py`,
+    # следующий шаг написал `import calculator` — и агент предложил
+    # поставить `calculator` с PyPI. Человек согласился, и в окружение
+    # приехал чужой пакет с подходящим именем.
+    planned = _planned_modules(state)
+
     missing: list[str] = []
     for path in state.extra.get("touched", []):
         try:
@@ -1026,6 +1051,8 @@ def node_deps(state: State) -> State:
         except (OSError, UnicodeDecodeError, guard.OutsideWorkspace):
             continue
         for module in env.missing_imports(text):
+            if module in planned:
+                continue
             package = env.package_for(module)
             if package not in missing:
                 missing.append(package)
@@ -1120,6 +1147,15 @@ def node_verify(state: State) -> State:
             # на единственный вопрос, который к каркасу имеет смысл.
             run = execute([interpreter(), "-m", "py_compile", entry], timeout=limit)
             state.extra["verified_by"] = f"разбор {entry} (просили каркас, выполнять в нём нечего)"
+        elif asks_input_on_import(entry):
+            # Ввод стоит на верхнем уровне модуля: импорт его ВЫПОЛНИТ
+            # и упадёт тем же EOFError, от которого импорт и должен был
+            # спасти. Живой прогон на этом откатил правильно написанное
+            # приложение. Остаётся разбор — он ничего не выполняет.
+            run = execute([interpreter(), "-m", "py_compile", entry], timeout=limit)
+            state.extra["verified_by"] = (
+                f"разбор {entry} (ввод спрашивается сразу при импорте, выполнять нечем)"
+            )
         elif _waits_for_input(entry):
             module = entry.rsplit("/", 1)[-1][: -len(".py")]
             run = execute([interpreter(), "-c", f"import {module}"], timeout=limit)
@@ -1143,23 +1179,67 @@ def node_verify(state: State) -> State:
     return state
 
 
-def _waits_for_input(path: str) -> bool:
-    """Читает ли программа ввод с клавиатуры.
+def _asks_input(node: ast.AST) -> bool:
+    """Есть ли внутри узла вызов `input(...)` или обращение к `sys.stdin`.
 
-    Разбором, а не поиском слова «input»: оно встречается и в имени
+    Ищется именно ВЫЗОВ, а не слово: «input» встречается и в имени
     переменной (`user_input`), и в комментарии, и в тексте подсказки.
-    Ищется именно ВЫЗОВ: `input(...)` или обращение к `sys.stdin`.
     """
-    try:
-        text = guard.resolve_path(path).read_text(encoding="utf-8")
-        tree = ast.parse(text)
-    except (OSError, UnicodeDecodeError, SyntaxError, ValueError, guard.OutsideWorkspace):
-        return False
-
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "input":
+    for inner in ast.walk(node):
+        if isinstance(inner, ast.Call) and isinstance(inner.func, ast.Name) and inner.func.id == "input":
             return True
-        if isinstance(node, ast.Attribute) and node.attr == "stdin":
+        if isinstance(inner, ast.Attribute) and inner.attr == "stdin":
+            return True
+    return False
+
+
+def _main_guard(node: ast.AST) -> bool:
+    """Это блок `if __name__ == "__main__":`?"""
+    if not isinstance(node, ast.If) or not isinstance(node.test, ast.Compare):
+        return False
+    left = node.test.left
+    return isinstance(left, ast.Name) and left.id == "__name__"
+
+
+def _module_tree(path: str) -> ast.Module | None:
+    """Разбор файла или None, если он не читается и не разбирается."""
+    try:
+        return ast.parse(guard.resolve_path(path).read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, SyntaxError, ValueError, guard.OutsideWorkspace):
+        return None
+
+
+def _waits_for_input(path: str) -> bool:
+    """Читает ли программа ввод с клавиатуры — где угодно в файле."""
+    tree = _module_tree(path)
+    return tree is not None and _asks_input(tree)
+
+
+def asks_input_on_import(path: str) -> bool:
+    """Спросит ли файл ввод ПРИ ИМПОРТЕ, а не только при запуске.
+
+    Разница стоила отката правильно написанного приложения, и вот она.
+    Проверка «программа ждёт ввода — значит импортируем» опирается
+    на молчаливое допущение, что интерактив лежит под `if __name__ ==
+    "__main__":`. Модель на 3B это допущение не разделяет: живой прогон
+    дал файл, где `input()` стоит прямо на верхнем уровне модуля.
+    Импорт такой модуль ВЫПОЛНЯЕТ — и падает тем же `EOFError`,
+    от которого импорт и должен был спасти.
+
+    Поэтому смотрим не «есть ли input», а «выполнится ли он при
+    импорте»: тела функций и классов при импорте не исполняются,
+    блок `__main__` при импорте не исполняется тоже, всё остальное —
+    исполняется.
+    """
+    tree = _module_tree(path)
+    if tree is None:
+        return False
+    for statement in tree.body:
+        if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            continue
+        if _main_guard(statement):
+            continue
+        if _asks_input(statement):
             return True
     return False
 
