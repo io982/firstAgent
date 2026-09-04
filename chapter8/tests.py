@@ -17,7 +17,6 @@
 """
 
 import json
-import math
 import os
 import shutil
 import subprocess
@@ -1989,6 +1988,27 @@ def file_answer(content):
     return json.dumps({"content": content})
 
 
+def fake_lint(*verdicts):
+    """Подделка линтера: по вердикту на вызов, последний повторяется.
+
+    Годится, когда агент трогает один файл: узел проверки спрашивает
+    линтер по разу на файл, и для одного файла вызов и прогон — одно
+    и то же.
+    """
+    answers = iter(verdicts)
+    last: list[str] = []
+
+    def lint(path):
+        nonlocal last
+        try:
+            last = list(next(answers))
+        except StopIteration:
+            pass
+        return last
+
+    return lint
+
+
 def fake_run(green, output=""):
     """Подделка запуска процесса: удачный или нет."""
     def run(command, timeout=None, feed=""):
@@ -2561,29 +2581,26 @@ class TestScaffoldAsked:
         assert called == []
         assert state.extra["missing_packages"] == []
 
-    def test_каркас_проверяется_разбором(self, workspace, monkeypatch):
+    def test_каркас_проверяется_линтером(self, workspace, monkeypatch):
         """Ни запуском, ни импортом — и то и другое здесь врёт.
 
         Запуск каркаса отработает с кодом 0 всегда: в теле многоточие.
         Импорт упадёт на пакете, которого ещё нет. Правду про каркас
-        говорит только разбор.
+        говорит то же, что и про любой другой файл: разбирается ли он
+        и нет ли в нём имён из ниоткуда.
         """
         (workspace / "app.py").write_text(
             'def main():\n    """делает дело"""\n    ...\n', encoding="utf-8"
         )
-        seen = []
-
-        def run(command, timeout=None, feed=""):
-            seen.append(command)
-            return Run(command, 0, "", "", 0.1)
-
-        monkeypatch.setattr(pipeline, "execute", run)
+        launched = []
+        monkeypatch.setattr(pipeline, "execute",
+                            lambda c, timeout=None, feed="": launched.append(c) or Run(str(c), 0, "", "", 0.1))
         state = started(Plan("напиши каркас приложения", []), touched=["app.py"])
         pipeline.node_verify(state)
 
         assert state.extra["tests_green"] is True
-        assert "разбор" in state.extra["verified_by"]
-        assert any("py_compile" in " ".join(command) for command in seen)
+        assert "линтер" in state.extra["verified_by"]
+        assert launched == [], "каркас не выполняют — там нечего выполнять"
 
 
 class TestStrayDefinitions:
@@ -2768,7 +2785,7 @@ class TestErrorWithoutText:
         pipeline.node_step(state)
 
         asked = model.seen[0][-1]["content"]
-        assert "NameError" in asked, "модель должна увидеть настоящую ошибку"
+        assert "имя не определено" in asked, "модель должна увидеть то, что видно без запуска"
 
     def test_рабочая_программа_ошибки_не_придумывает(self, workspace, monkeypatch):
         (workspace / "app.py").write_text("print(1)\n", encoding="utf-8")
@@ -2881,95 +2898,6 @@ class TestDepsNode:
         assert called == ["requests"]
 
 
-class TestInputAtImport:
-    """Ввод на верхнем уровне модуля против ввода под `if __name__`.
-
-    Разница стоила отката правильно написанного приложения. Проверка
-    «программа ждёт ввода — значит импортируем» опиралась на молчаливое
-    допущение, что интерактив лежит под `__main__`. Модель на 3B этого
-    допущения не разделяет: живой прогон дал файл, где `input()` стоит
-    прямо на верхнем уровне. Импорт такой модуль ВЫПОЛНЯЕТ и падает тем
-    же EOFError, от которого импорт и должен был спасти.
-    """
-
-    GUARDED = (
-        "def solve(a):\n"
-        '    """корни"""\n'
-        "    return a\n"
-        "\n\n"
-        'if __name__ == "__main__":\n'
-        "    a = float(input('a: '))\n"
-        "    print(solve(a))\n"
-    )
-    BARE = (
-        "def solve(a):\n"
-        '    """корни"""\n'
-        "    return a\n"
-        "\n\n"
-        "print('программа о квадратных уравнениях')\n"
-        "a = float(input('a: '))\n"
-        "print(solve(a))\n"
-    )
-
-    def test_под_main_импорт_безопасен(self, workspace):
-        (workspace / "app.py").write_text(self.GUARDED, encoding="utf-8")
-        assert pipeline._waits_for_input("app.py")
-        assert not pipeline.asks_input_on_import("app.py")
-
-    def test_на_верхнем_уровне_импорт_спросит(self, workspace):
-        (workspace / "app.py").write_text(self.BARE, encoding="utf-8")
-        assert pipeline._waits_for_input("app.py")
-        assert pipeline.asks_input_on_import("app.py")
-
-    def test_ввод_внутри_функции_при_импорте_молчит(self, workspace):
-        (workspace / "app.py").write_text(
-            "def ask():\n    return input('a: ')\n", encoding="utf-8")
-        assert not pipeline.asks_input_on_import("app.py")
-
-    def test_имя_переменной_вводом_не_считается(self, workspace):
-        (workspace / "app.py").write_text("user_input = 1\n", encoding="utf-8")
-        assert not pipeline._waits_for_input("app.py")
-        assert not pipeline.asks_input_on_import("app.py")
-
-    def test_ввод_подставляется_и_программа_запускается(self, workspace, monkeypatch):
-        """Запуск с подставленным вводом заменил и импорт, и разбор.
-
-        Оба молчали про то, ради чего программу пишут: файл разбирается,
-        импортируется — а запуск падает NameError на первой же строке.
-        Ввод подставляется строками, и программа выполняется всерьёз.
-        """
-        (workspace / "app.py").write_text(self.BARE, encoding="utf-8")
-        seen = []
-
-        def run(command, timeout=None, feed=""):
-            seen.append((command, feed))
-            return Run(str(command), 0, "", "", 0.1)
-
-        monkeypatch.setattr(pipeline, "execute", run)
-        state = started(Plan("з", []), touched=["app.py"])
-        pipeline.node_verify(state)
-
-        assert state.extra["tests_green"]
-        assert "с подставленным вводом" in state.extra["verified_by"]
-        assert seen[0][1] == pipeline.SCRIPTED_INPUT
-
-    def test_ввод_под_main_тоже_подставляется(self, workspace, monkeypatch):
-        """Разница «на верхнем уровне или под __main__» для запуска не важна."""
-        (workspace / "app.py").write_text(self.GUARDED, encoding="utf-8")
-        seen = []
-
-        def run(command, timeout=None, feed=""):
-            seen.append((command, feed))
-            return Run(str(command), 0, "", "", 0.1)
-
-        monkeypatch.setattr(pipeline, "execute", run)
-        state = started(Plan("з", []), touched=["app.py"])
-        pipeline.node_verify(state)
-
-        assert "с подставленным вводом" in state.extra["verified_by"]
-        assert seen[0][1] == pipeline.SCRIPTED_INPUT
-
-
 class TestPlannedModules:
     """Свой модуль не ищется в сети, даже если файл не написался."""
 
@@ -2995,161 +2923,6 @@ class TestPlannedModules:
         state = started(Plan("з", [Step("create", "app.py", "")]), touched=["app.py"])
         pipeline.node_deps(state)
         assert called == ["такогонет"]
-
-
-class TestUndefinedNames:
-    """Программу, которую нельзя запустить, проверяет линтер вместо запуска.
-
-    Живой прогон: правка вернула `return root1, root2, derivative`, где
-    `derivative` не существует. Файл разбирается, импортируется, агент
-    рапортует «Готово» — а запуск падает NameError на первой же строке.
-    Импорт и разбор молчат ровно про то, ради чего программу пишут.
-    """
-
-    BROKEN = (
-        "def solve(a, b, c):\n"
-        "    return a, derivative\n"
-        "\n\n"
-        "def main():\n"
-        "    a = float(input('a: '))\n"
-        "    print(solve(a, 1, 1))\n"
-        "\n\n"
-        "if __name__ == '__main__':\n"
-        "    main()\n"
-    )
-
-    def test_имя_из_ниоткуда_ловится(self, workspace):
-        (workspace / "app.py").write_text(self.BROKEN, encoding="utf-8")
-        assert undefined_names("app.py") == ["derivative"]
-
-    def test_целый_файл_претензий_не_вызывает(self, workspace):
-        (workspace / "app.py").write_text(self.BROKEN.replace(", derivative", ""), encoding="utf-8")
-        assert undefined_names("app.py") == []
-
-    def test_не_python_не_проверяется(self, workspace):
-        (workspace / "run.bat").write_text("@echo off\npython app.py\n", encoding="utf-8")
-        assert undefined_names("run.bat") == []
-
-    def test_проверка_ловит_ненайденное_имя_в_конвейере(self, workspace):
-        (workspace / "app.py").write_text(self.BROKEN, encoding="utf-8")
-        state = started(Plan("з", []), touched=["app.py"])
-        pipeline.node_verify(state)
-
-        assert state.extra["tests_green"] is False
-        assert "derivative" in state.extra["failure"]
-
-    def test_слово_запускать_проверку_не_отменяет(self, workspace):
-        """Проверка стояла на `"запуск" not in verified_by` — и молча ломалась.
-
-        Строка «программа ждёт ввода, ЗАПУСКАТЬ её нечем» содержит
-        подстроку «запуск», а смысл у неё обратный: программу как раз
-        НЕ запускали. Признаком служит флаг, а не поиск слова в тексте,
-        написанном для человека.
-        """
-        (workspace / "app.py").write_text(self.BROKEN, encoding="utf-8")
-        state = started(Plan("з", []), touched=["app.py"])
-        pipeline.node_verify(state)
-        # Программа запускается по-настоящему и падает по-настоящему:
-        # NameError вместо нашей формулировки про неопределённые имена.
-        assert state.extra["tests_green"] is False
-        assert "derivative" in state.extra["failure"]
-
-    def test_линтер_спрашивается_и_у_запущенной(self, workspace, monkeypatch):
-        """Запуск проходит ОДНОЙ веткой, а имя не определено во всём файле.
-
-        Живой прогон: `math.sqrt` без `import math`, подставленные
-        числа дали отрицательный дискриминант, ветка с корнями
-        не выполнилась — запуск зелёный, программа падает на первом же
-        уравнении с корнями. Линтер видел это с самого начала, а его
-        не спрашивали: «запуск сильнее линтера» оказалось неверным.
-        """
-        (workspace / "app.py").write_text("print(1)" + chr(10), encoding="utf-8")
-        monkeypatch.setattr(pipeline, "execute", fake_run(green=True))
-        monkeypatch.setattr(pipeline, "undefined_names", lambda p: ["math"])
-        state = started(Plan("з", []), touched=["app.py"])
-        pipeline.node_verify(state)
-
-        assert state.extra["tests_green"] is False
-        assert "math" in state.extra["failure"]
-
-    def test_запуск_идёт_несколькими_наборами_ввода(self, workspace, monkeypatch):
-        """Один набор проходит одной веткой, беда в соседней остаётся невидимой."""
-        (workspace / "app.py").write_text("print(input())" + chr(10), encoding="utf-8")
-        feeds = []
-        monkeypatch.setattr(pipeline, "execute",
-                            lambda c, timeout=None, feed="": feeds.append(feed) or Run(str(c), 0, "", "", 0.1))
-        monkeypatch.setattr(pipeline, "undefined_names", lambda p: [])
-        state = started(Plan("з", []), touched=["app.py"])
-        pipeline.node_verify(state)
-
-        assert feeds == list(pipeline.SCRIPTED_INPUTS)
-
-    def test_первый_же_провал_прекращает_запуски(self, workspace, monkeypatch):
-        (workspace / "app.py").write_text("print(input())" + chr(10), encoding="utf-8")
-        feeds = []
-        monkeypatch.setattr(pipeline, "execute",
-                            lambda c, timeout=None, feed="": feeds.append(feed) or Run(str(c), 1, "", "ZeroDivisionError", 0.1))
-        state = started(Plan("з", []), touched=["app.py"])
-        pipeline.node_verify(state)
-
-        assert len(feeds) == 1, "сломано — дальше проверять нечего"
-        assert state.extra["tests_green"] is False
-
-
-class TestVerifyModes:
-    def test_есть_тесты_значит_pytest(self, project, monkeypatch):
-        monkeypatch.setattr(pipeline, "execute", fake_run(green=True))
-        state = started(Plan("з", []), touched=["calc_mod.py"])
-        pipeline.node_verify(state)
-        assert state.extra["verified_by"] == "pytest"
-        assert state.extra["tests_green"]
-
-    def test_тестов_нет_значит_запуск_файла(self, workspace, monkeypatch):
-        (workspace / "app.py").write_text("print(1)\n", encoding="utf-8")
-        seen = []
-        monkeypatch.setattr(pipeline, "execute",
-                            lambda c, timeout=None, feed="": seen.append(c) or Run(c, 0, "1", "", 0.1))
-        state = started(Plan("з", []), touched=["app.py"])
-        pipeline.node_verify(state)
-        assert state.extra["verified_by"] == "запуск app.py"
-        assert seen[0] == [interpreter(), "app.py"], "путь отдельным аргументом: в нём бывает пробел"
-        assert state.extra["tests_green"]
-
-    def test_проверять_нечем(self, workspace):
-        """«Нечем проверить» — отдельный исход, а не провал."""
-        state = started(Plan("з", []), touched=[])
-        pipeline.node_verify(state)
-        assert state.extra["verified_by"] == "нечем"
-        assert state.extra["unverifiable"]
-        assert not state.extra["tests_green"]
-        assert state.extra["failure"] == "", "чинить нечего — ошибки нет"
-
-    def test_нечем_проверить_ведёт_к_итогу_а_не_к_починке(self, workspace):
-        """Чинить нечего, если не сломано.
-
-        Живой прогон: агент написал батник — правильно написал, — а `.bat`
-        этой главе проверять нечем. Прогон считался провалившимся, цикл
-        починки два круга бился о пустоту, и работа откатывалась.
-        """
-        state = started(Plan("з", []), touched=[])
-        pipeline.node_verify(state)
-        assert pipeline.edge_after_verify(state) == pipeline.DONE
-
-    def test_красная_проверка_по_прежнему_ведёт_к_починке(self, project, monkeypatch):
-        monkeypatch.setattr(pipeline, "execute", fake_run(green=False))
-        state = started(Plan("з", []), touched=["calc_mod.py"])
-        pipeline.node_verify(state)
-        assert pipeline.edge_after_verify(state) == pipeline.READ_NODE
-
-    def test_запускается_не_тестовый_файл(self, workspace, monkeypatch):
-        (workspace / "app.py").write_text("print(1)\n", encoding="utf-8")
-        (workspace / "helper.py").write_text("print(2)\n", encoding="utf-8")
-        seen = []
-        monkeypatch.setattr(pipeline, "execute",
-                            lambda c, timeout=None, feed="": seen.append(c) or Run(c, 0, "", "", 0.1))
-        state = started(Plan("з", []), touched=["app.py", "helper.py"])
-        pipeline.node_verify(state)
-        assert "helper.py" in seen[0], "запускается последний написанный"
 
 
 class TestConftestGate:
@@ -3254,196 +3027,211 @@ class TestConftestGate:
         assert guard.conftest_files() == []
         assert guard.allow_pytest() == (True, "")
 
-    def test_отказ_в_конвейере_это_нечем_проверить(self, project, monkeypatch):
-        """Отказ не должен выглядеть как сломанная работа.
 
-        Разница принципиальная: «проверили, и сломано» ведёт к откату,
-        а «нечем проверить» оставляет сделанное на диске. Стереть
-        правильно написанный код за то, что человек не разрешил
-        запускать чужой conftest.py, — худший из возможных исходов.
-        """
-        (project / "conftest.py").write_text("import os\n", encoding="utf-8")
-        monkeypatch.setattr(pipeline, "execute", fake_run(green=True))
-        self.ask(False)
+class TestUndefinedNames:
+    """Программу, которую нельзя запустить, проверяет линтер вместо запуска.
 
-        state = started(Plan("з", []), touched=["calc_mod.py"])
+    Живой прогон: правка вернула `return root1, root2, derivative`, где
+    `derivative` не существует. Файл разбирается, импортируется, агент
+    рапортует «Готово» — а запуск падает NameError на первой же строке.
+    Импорт и разбор молчат ровно про то, ради чего программу пишут.
+    """
+
+    BROKEN = (
+        "def solve(a, b, c):\n"
+        "    return a, derivative\n"
+        "\n\n"
+        "def main():\n"
+        "    a = float(input('a: '))\n"
+        "    print(solve(a, 1, 1))\n"
+        "\n\n"
+        "if __name__ == '__main__':\n"
+        "    main()\n"
+    )
+
+    def test_имя_из_ниоткуда_ловится(self, workspace):
+        (workspace / "app.py").write_text(self.BROKEN, encoding="utf-8")
+        assert undefined_names("app.py") == ["derivative"]
+
+    def test_целый_файл_претензий_не_вызывает(self, workspace):
+        (workspace / "app.py").write_text(self.BROKEN.replace(", derivative", ""), encoding="utf-8")
+        assert undefined_names("app.py") == []
+
+    def test_не_python_не_проверяется(self, workspace):
+        (workspace / "run.bat").write_text("@echo off\npython app.py\n", encoding="utf-8")
+        assert undefined_names("run.bat") == []
+
+    def test_проверка_ловит_ненайденное_имя_в_конвейере(self, workspace):
+        (workspace / "app.py").write_text(self.BROKEN, encoding="utf-8")
+        state = started(Plan("з", []), touched=["app.py"])
         pipeline.node_verify(state)
 
+        assert state.extra["tests_green"] is False
+        assert "derivative" in state.extra["failure"]
+
+    def test_слово_запускать_проверку_не_отменяет(self, workspace):
+        """Проверка стояла на `"запуск" not in verified_by` — и молча ломалась.
+
+        Строка «программа ждёт ввода, ЗАПУСКАТЬ её нечем» содержит
+        подстроку «запуск», а смысл у неё обратный: программу как раз
+        НЕ запускали. Признаком служит флаг, а не поиск слова в тексте,
+        написанном для человека.
+        """
+        (workspace / "app.py").write_text(self.BROKEN, encoding="utf-8")
+        state = started(Plan("з", []), touched=["app.py"])
+        pipeline.node_verify(state)
+        # Программа запускается по-настоящему и падает по-настоящему:
+        # NameError вместо нашей формулировки про неопределённые имена.
+        assert state.extra["tests_green"] is False
+        assert "derivative" in state.extra["failure"]
+
+
+
+class TestVerifyModes:
+    """Что узел проверки считает приговором, а что — отсутствием проверки."""
+
+    def test_проверка_это_линтер(self, workspace):
+        (workspace / "app.py").write_text("print(1)\n", encoding="utf-8")
+        state = started(Plan("з", []), touched=["app.py"])
+        pipeline.node_verify(state)
+        assert state.extra["verified_by"] == "линтер: app.py"
+        assert state.extra["tests_green"]
+
+    def test_проверять_нечем(self, workspace):
+        """«Нечем проверить» — отдельный исход, а не провал."""
+        state = started(Plan("з", []), touched=[])
+        pipeline.node_verify(state)
         assert state.extra["verified_by"] == "нечем"
         assert state.extra["unverifiable"]
         assert not state.extra["tests_green"]
+        assert state.extra["failure"] == "", "чинить нечего — ошибки нет"
+
+    def test_не_python_проверять_нечем(self, workspace):
+        """Батник линтеру не показать, и объявлять его сломанным не за что."""
+        (workspace / "run.bat").write_text("@echo off\n", encoding="utf-8")
+        state = started(Plan("з", []), touched=["run.bat"])
+        pipeline.node_verify(state)
+        assert state.extra["unverifiable"]
+
+    def test_нечем_проверить_ведёт_к_итогу_а_не_к_починке(self, workspace):
+        """Чинить нечего, если не сломано.
+
+        Живой прогон: агент написал батник — правильно написал, — а `.bat`
+        этой главе проверять нечем. Прогон считался провалившимся, цикл
+        починки два круга бился о пустоту, и работа откатывалась.
+        """
+        state = started(Plan("з", []), touched=[])
+        pipeline.node_verify(state)
         assert pipeline.edge_after_verify(state) == pipeline.DONE
 
+    def test_красная_проверка_по_прежнему_ведёт_к_починке(self, workspace, monkeypatch):
+        (workspace / "app.py").write_text("print(1)\n", encoding="utf-8")
+        monkeypatch.setattr(pipeline, "lint_problems", fake_lint(["app.py: имя не определено — math"]))
+        state = started(Plan("з", []), touched=["app.py"])
+        pipeline.node_verify(state)
+        assert pipeline.edge_after_verify(state) == pipeline.READ_NODE
 
-class TestInteractiveProgram:
-    """Программу, которая ждёт ввода, запуском не проверить.
 
-    Нашёл живой прогон, и цена ошибки была высокой: агент написал
-    работающий калькулятор, проверка запустила его без stdin, тот честно
-    упал с `EOFError`, и конвейер откатил готовую работу как сломанную.
-    У проверки нет пользователя, который нажмёт клавиши.
+class TestVerifyIsLintOnly:
+    """Приговор выносит только то, что не зависит от задачи.
+
+    Узел проверки долго пытался ответить на вопрос «работает ли»: гонял
+    pytest, запускал программу, а программе, ждущей ввода, подставлял
+    числа со stdin. Последнее и оказалось ловушкой — чтобы подставить
+    ввод, надо знать область определения задачи, а её знает только
+    человек, который задачу поставил. Тесты ниже стерегут границу:
+    проверка смотрит на файл и ничего не выполняет.
     """
 
-    def test_вызов_input_виден(self, workspace):
-        (workspace / "a.py").write_text("x = input()\n", encoding="utf-8")
-        assert pipeline._waits_for_input("a.py")
+    LOGARITHM = (
+        "import math\n"
+        "base = float(input('Введите основание: '))\n"
+        "number = float(input('Введите число: '))\n"
+        "print(math.log(number, base))\n"
+    )
 
-    def test_чтение_stdin_видно(self, workspace):
-        (workspace / "a.py").write_text("import sys\nprint(sys.stdin.read())\n", encoding="utf-8")
-        assert pipeline._waits_for_input("a.py")
-
-    def test_слово_input_в_имени_переменной_не_считается(self, workspace):
-        """Разбор, а не поиск подстроки: `user_input` — не вызов."""
-        (workspace / "a.py").write_text("user_input = 1  # input() тут в комментарии\n", encoding="utf-8")
-        assert not pipeline._waits_for_input("a.py")
-
-    def test_сломанный_файл_не_роняет_проверку(self, workspace):
-        (workspace / "a.py").write_text("def f(:\n", encoding="utf-8")
-        assert not pipeline._waits_for_input("a.py")
-
-    def test_интерактивная_программа_запускается_с_вводом(self, workspace, monkeypatch):
-        """Раньше её импортировали — теперь запускают, подставив строки.
-
-        Импорт отвечал на вопрос «файл разбирается и подключается»,
-        а человеку нужен ответ на другой: «работает ли программа».
-        """
-        (workspace / "app.py").write_text(
-            "def main():" + chr(10) + "    print(input())" + chr(10) * 2 +
-            "if __name__ == '__main__':" + chr(10) + "    main()" + chr(10),
-            encoding="utf-8",
-        )
-        seen = []
+    def test_ничего_не_запускается(self, workspace, monkeypatch):
+        """Главная граница: проверка не выполняет ни строчки кода агента."""
+        (workspace / "app.py").write_text("print(1)\n", encoding="utf-8")
+        launched = []
         monkeypatch.setattr(pipeline, "execute",
-                            lambda c, timeout=None, feed="": seen.append((c, feed)) or Run(str(c), 0, "", "", 0.1))
-        state = started(Plan("з", [Step("create", "app.py", "")]), touched=["app.py"])
+                            lambda c, timeout=None, feed="": launched.append(c) or Run(str(c), 0, "", "", 0.1))
+        state = started(Plan("з", []), touched=["app.py"])
         pipeline.node_verify(state)
 
-        assert "с подставленным вводом" in state.extra["verified_by"]
-        assert seen[0][0][-1] == "app.py", "запускается файл, а не импортируется модуль"
-        assert state.extra["tests_green"]
+        assert launched == [], "узел проверки больше ничего не запускает"
+        assert state.extra["verified_by"] == "линтер: app.py"
 
-    # ---- ввод годится не только квадратному уравнению -----------------
+    def test_интерактивная_программа_проходит(self, workspace):
+        """Регрессия на живой прогон: логарифм откатывался трижды подряд.
 
-    def test_вырожденных_чисел_во_вводе_нет(self):
-        """Ноль, единица и отрицательные числа ломают исправные программы.
-
-        Живой прогон, стоивший трёх откачённых правильных программ:
-        первые наборы были подобраны под квадратное уравнение и
-        начинались с единицы. `math.log(x, 1)` — деление на `log(1)`,
-        то есть на ноль, и калькулятор логарифмов объявлялся сломанным
-        трижды подряд, на двух разных моделях.
+        Ввод подставляли мы, единица в основании логарифма запрещена,
+        `math.log(x, 1)` — деление на ноль. Программа была исправна.
         """
-        for numbers in pipeline.SCRIPTED_NUMBERS:
-            for value in numbers:
-                assert value > 1, f"{value} в наборе {numbers}: вырожденный вход"
-
-    def test_настоящий_логарифм_проверку_проходит(self, workspace):
-        """Регрессия на тот самый живой прогон."""
-        (workspace / "log_app.py").write_text(
-            "import math\n"
-            "base = float(input('Введите основание: '))\n"
-            "number = float(input('Введите число: '))\n"
-            "print(math.log(number, base))\n",
-            encoding="utf-8",
-        )
-        state = started(Plan("з", [Step("create", "log_app.py", "")]), touched=["log_app.py"])
+        (workspace / "log_app.py").write_text(self.LOGARITHM, encoding="utf-8")
+        state = started(Plan("з", []), touched=["log_app.py"])
         pipeline.node_verify(state)
 
         assert state.extra["tests_green"], state.extra["failure"]
 
-    def test_первый_набор_даёт_настоящий_ответ(self):
-        """Основание 2 и число 8 — это логарифм 3, а не ошибка области.
+    def test_программе_нужен_внешний_файл_и_это_не_беда(self, workspace):
+        """Вторая половина того же: запускать нечего, если нужен мир.
 
-        Проверка, которая ни разу не досчитывает до ответа, ничего
-        не проверяет: живой прогон принял программу, где все три набора
-        уходили в `except` и печатали сообщение об ошибке.
+        Программа, читающая Excel, при запуске падает FileNotFoundError
+        — не потому, что написана неверно, а потому, что файла нет
+        и взять его негде.
         """
-        base, number, _ = pipeline.SCRIPTED_NUMBERS[0]
-        assert math.log(number, base) == 3
-
-    def test_обе_ветки_дискриминанта_покрыты(self):
-        """Разнообразие веток держится дискриминантом, а не вырожденностью."""
-        signs = {b * b - 4 * a * c > 0 for a, b, c in pipeline.SCRIPTED_NUMBERS}
-        assert signs == {True, False}, "нужен и набор с корнями, и набор без них"
-
-    def test_ошибка_называет_подставленный_ввод(self, workspace):
-        """Без этого починка чинит вслепую.
-
-        Живой прогон: модель получила «ZeroDivisionError» и ничего
-        больше — про то, что основание логарифма подали МЫ, в задании
-        не было ни слова, и два круга ушли на починку исправного кода.
-        """
-        (workspace / "bad.py").write_text(
-            "value = float(input('число: '))\nprint(1 / (value - value))\n", encoding="utf-8"
+        (workspace / "excel.py").write_text(
+            "import json\n"
+            "with open('data.json', encoding='utf-8') as f:\n"
+            "    print(json.load(f))\n",
+            encoding="utf-8",
         )
-        state = started(Plan("з", [Step("create", "bad.py", "")]), touched=["bad.py"])
+        state = started(Plan("з", []), touched=["excel.py"])
         pipeline.node_verify(state)
 
-        assert not state.extra["tests_green"]
-        assert "с подставленным вводом" in state.extra["failure"]
-        assert pipeline.shown_input(pipeline.SCRIPTED_NUMBERS[0]) in state.extra["failure"]
-        assert "ZeroDivisionError" in state.extra["failure"]
+        assert state.extra["tests_green"], state.extra["failure"]
 
-    def test_отчёт_человеку_тоже_называет_числа(self, workspace):
-        """Прошли все наборы — в отчёте все: назвать один было бы неправдой."""
-        (workspace / "app.py").write_text("print(int(input()) * 2)\n", encoding="utf-8")
-        state = started(Plan("з", [Step("create", "app.py", "")]), touched=["app.py"])
+    def test_каркас_проходит(self, workspace):
+        """Заглушки не запускают, поэтому и `pass` в теле никого не смущает."""
+        (workspace / "skeleton.py").write_text(
+            "def solve(a, b):\n"
+            '    """Решает уравнение."""\n'
+            "    pass\n",
+            encoding="utf-8",
+        )
+        state = started(Plan("з", []), touched=["skeleton.py"])
         pipeline.node_verify(state)
 
         assert state.extra["tests_green"]
-        for numbers in pipeline.SCRIPTED_NUMBERS:
-            assert pipeline.shown_input(numbers) in state.extra["verified_by"]
 
-    def test_подставляются_только_числа(self):
-        """Пустая строка в конце ввода ломала программу с циклом.
-
-        Живой прогон: «сделай интерактив» модель понимает как цикл
-        «спрашивай, пока не надоест». Такая программа добиралась
-        до наших пустых строк, `float('')` падал с ValueError —
-        и агент объявлял сломанной работающую программу, а потом
-        откатывал её.
-        """
-        for feed in pipeline.SCRIPTED_INPUTS:
-            assert feed.strip(), "ввод не бывает пустым"
-            for line in feed.splitlines():
-                assert line.strip(), "пустых строк во вводе нет"
-                float(line)
-
-    def test_ввода_хватает_на_цикл(self):
-        """Коротким вводом программу с циклом не проверить."""
-        assert pipeline.SCRIPTED_INPUTS[0].count(chr(10)) >= 12
-
-    def test_не_хватило_ввода_это_не_провал(self, workspace, monkeypatch):
-        """Программа спросила больше, чем мы дали, — это наша беда, не её."""
-        (workspace / "app.py").write_text(
-            "print(input())" + chr(10) + "print(input())" + chr(10), encoding="utf-8")
-        answers = iter([Run("запуск", 1, "", "EOFError: EOF when reading a line", 0.1),
-                        Run("разбор", 0, "", "", 0.1)])
-        monkeypatch.setattr(pipeline, "execute",
-                            lambda c, timeout=None, feed="": next(answers))
+    def test_сломанный_синтаксис_ловится(self, workspace):
+        """Линтер отвечает и за разбор: `--select F821` его не отключает."""
+        (workspace / "app.py").write_text("def f(:\n    pass\n", encoding="utf-8")
         state = started(Plan("з", []), touched=["app.py"])
         pipeline.node_verify(state)
 
-        assert state.extra["tests_green"], "разбор прошёл — значит, не сломано"
-        assert "не хватило" in state.extra["verified_by"]
+        assert not state.extra["tests_green"]
+        assert "не разбирается" in state.extra["failure"]
 
-    def test_обычная_программа_по_прежнему_запускается(self, workspace, monkeypatch):
-        (workspace / "app.py").write_text("print('привет')\n", encoding="utf-8")
-        seen = []
-        monkeypatch.setattr(pipeline, "execute",
-                            lambda c, timeout=None, feed="": seen.append(c) or Run(str(c), 0, "", "", 0.1))
-        state = started(Plan("з", [Step("create", "app.py", "")]), touched=["app.py"])
+    def test_неопределённое_имя_ловится(self, workspace):
+        (workspace / "app.py").write_text("print(math.pi)\n", encoding="utf-8")
+        state = started(Plan("з", []), touched=["app.py"])
         pipeline.node_verify(state)
 
-        assert state.extra["verified_by"] == "запуск app.py"
-        assert seen[0] == [interpreter(), "app.py"], "путь отдельным аргументом: в нём бывает пробел"
+        assert not state.extra["tests_green"]
+        assert "math" in state.extra["failure"]
 
-    def test_дочернему_процессу_не_отдаётся_наш_терминал(self, workspace):
-        """Иначе программа агента заберёт ввод себе, и агент повиснет."""
-        (workspace / "a.py").write_text("print(input())\n", encoding="utf-8")
-        run = execute("python a.py", timeout=30)
-        assert not run.ok
-        assert "EOF" in run.text(), "ввод должен быть закрыт, а не унаследован"
+    def test_проверяются_все_файлы_агента(self, workspace):
+        """Прежний узел смотрел на точку входа, и беда в соседнем модуле пряталась."""
+        (workspace / "app.py").write_text("print(1)\n", encoding="utf-8")
+        (workspace / "helper.py").write_text("print(nothing_here)\n", encoding="utf-8")
+        state = started(Plan("з", []), touched=["app.py", "helper.py"])
+        pipeline.node_verify(state)
+
+        assert not state.extra["tests_green"]
+        assert "nothing_here" in state.extra["failure"]
+
 
 
 class TestFileToFix:
@@ -3674,9 +3462,7 @@ class TestPipelineRun:
             edit_answer("calc_mod.py", 2, 2, "    return a * b"),
             edit_answer("calc_mod.py", 2, 2, "    return a + b"),
         ]))
-        results = iter([False, True])
-        monkeypatch.setattr(pipeline, "execute",
-                            lambda c, timeout=None, feed="": Run(c, 0 if next(results) else 1, "E  assert 0 == 4", "", 0.2))
+        monkeypatch.setattr(pipeline, "lint_problems", fake_lint(["calc_mod.py: имя не определено — b"], []))
 
         state = pipeline.run_pipeline("почини сложение", plan=fix_plan)
         assert state.extra["tests_green"]
@@ -3691,21 +3477,19 @@ class TestPipelineRun:
             edit_answer("calc_mod.py", 2, 2, "    return a + b"),
         ])
         monkeypatch.setattr(pipeline, "request_model", model)
-        results = iter([False, True])
-        monkeypatch.setattr(pipeline, "execute",
-                            lambda c, timeout=None, feed="": Run(c, 0 if next(results) else 1, "E  assert 0 == 4", "", 0.2))
+        monkeypatch.setattr(pipeline, "lint_problems", fake_lint(["calc_mod.py: имя не определено — b"], []))
         pipeline.run_pipeline("почини сложение", plan=fix_plan)
 
         second = model.seen[1][-1]["content"]
         assert "return a * b" in second, "на втором круге модель должна видеть свою же правку"
         assert "return a - b" not in second, "а не текст файла до неё"
-        assert "assert 0 == 4" in second, "и текст ошибки"
+        assert "имя не определено" in second, "и то, что сказал линтер"
 
     def test_исчерпание_попыток_откатывает(self, project, monkeypatch, fix_plan):
         before = (project / "calc_mod.py").read_text(encoding="utf-8")
         monkeypatch.setattr(pipeline, "request_model",
                             fake_model([edit_answer("calc_mod.py", 2, 2, "    return a * b")]))
-        monkeypatch.setattr(pipeline, "execute", fake_run(green=False))
+        monkeypatch.setattr(pipeline, "lint_problems", fake_lint(["calc_mod.py: имя не определено — b"]))
 
         state = pipeline.run_pipeline("почини сложение", plan=fix_plan)
         assert not state.extra["tests_green"]
@@ -3715,7 +3499,7 @@ class TestPipelineRun:
 
     def test_откат_убирает_созданные_файлы(self, workspace, monkeypatch):
         monkeypatch.setattr(pipeline, "request_model", fake_model([file_answer("x = 1\n")]))
-        monkeypatch.setattr(pipeline, "execute", fake_run(green=False))
+        monkeypatch.setattr(pipeline, "lint_problems", fake_lint(["app.py: имя не определено — b"]))
         plan = Plan("з", [Step("create", "app.py", "что-то"), Step("test", "", "")])
 
         state = pipeline.run_pipeline("напиши что-нибудь", plan=plan)
@@ -3788,19 +3572,15 @@ class TestPipelineRun:
 
     def test_красная_проверка_после_правки_даёт_ещё_круг(self, project, monkeypatch, fix_plan):
         """А вот это уже работа цикла починки: правка легла, тесты красные."""
-        ran = []
         monkeypatch.setattr(pipeline, "request_model", fake_model([
             edit_answer("calc_mod.py", 2, 2, "    return a * b"),
             edit_answer("calc_mod.py", 2, 2, "    return a + b"),
         ]))
-        results = iter([False, True])
-        monkeypatch.setattr(pipeline, "execute",
-                            lambda c, timeout=None, feed="": (ran.append(c),
-                                                     Run(c, 0 if next(results) else 1, "E fail", "", 0.2))[1])
+        monkeypatch.setattr(pipeline, "lint_problems", fake_lint(["calc_mod.py: имя не определено — b"], []))
         state = pipeline.run_pipeline("почини сложение", plan=fix_plan)
         assert state.extra["tests_green"]
         assert state.steps.count("edit") == 1, "один круг починки"
-        assert len(ran) == 2, "первая проверка после шагов, вторая после починки"
+        assert state.steps.count("verify") == 2, "первая проверка после шагов, вторая после починки"
 
     def test_отказ_человека_останавливает_до_первого_действия(self, project, monkeypatch, fix_plan):
         before = (project / "calc_mod.py").read_text(encoding="utf-8")
@@ -3847,7 +3627,7 @@ class TestPipelineRun:
         monkeypatch.setattr(pipeline, "execute", fake_run(green=True))
         state = pipeline.run_pipeline("почини сложение", plan=fix_plan)
         assert "1. edit calc_mod.py" in state.answer
-        assert "Проверено: pytest" in state.answer
+        assert "Проверено: линтер" in state.answer
 
 
 class TestHonestOutcome:
@@ -3950,13 +3730,12 @@ class TestPromisedTests:
         state = started(Plan("з", [Step("create", "app.py", ""), Step("test", "", "")]))
         assert not state.extra["wants_tests"]
 
-    def test_без_обещания_запуск_файла_законен(self, workspace, monkeypatch):
+    def test_без_обещания_проверка_обычная(self, workspace):
         (workspace / "app.py").write_text("print(1)\n", encoding="utf-8")
-        monkeypatch.setattr(pipeline, "execute", fake_run(green=True))
         state = started(Plan("з", [Step("create", "app.py", ""), Step("test", "", "")]),
                         touched=["app.py"])
         pipeline.node_verify(state)
-        assert state.extra["verified_by"] == "запуск app.py"
+        assert state.extra["verified_by"] == "линтер: app.py"
         assert state.extra["tests_green"]
 
     def test_обещали_тесты_а_их_нет_это_провал(self, workspace, monkeypatch):
@@ -3972,12 +3751,11 @@ class TestPromisedTests:
         assert state.extra["verified_by"] == "нечем"
         assert "обещал тесты" in state.extra["failure"]
 
-    def test_обещали_и_написали_значит_pytest(self, project, monkeypatch):
-        monkeypatch.setattr(pipeline, "execute", fake_run(green=True))
+    def test_обещали_и_написали_проверяются_оба_файла(self, project):
         state = started(Plan("з", [Step("create", "test_calc_mod.py", "")]),
                         touched=["calc_mod.py", "test_calc_mod.py"])
         pipeline.node_verify(state)
-        assert state.extra["verified_by"] == "pytest"
+        assert state.extra["verified_by"] == "линтер: calc_mod.py, test_calc_mod.py"
 
 
 class TestWriteTimeout:
@@ -4053,7 +3831,7 @@ class TestUnverifiableOutcome:
         before = (project / "calc_mod.py").read_text(encoding="utf-8")
         monkeypatch.setattr(pipeline, "request_model",
                             fake_model([edit_answer("calc_mod.py", 2, 2, "    return a * b")]))
-        monkeypatch.setattr(pipeline, "execute", fake_run(green=False))
+        monkeypatch.setattr(pipeline, "lint_problems", fake_lint(["calc_mod.py: имя не определено — b"]))
         state = pipeline.run_pipeline("почини сложение", plan=fix_plan)
         assert "откачено" in state.answer
         assert (project / "calc_mod.py").read_text(encoding="utf-8") == before
@@ -4162,9 +3940,7 @@ class TestLangGraphPipeline:
             edit_answer("calc_mod.py", 2, 2, "    return a * b"),
             edit_answer("calc_mod.py", 2, 2, "    return a + b"),
         ]))
-        results = iter([False, True])
-        monkeypatch.setattr(pipeline, "execute",
-                            lambda c, timeout=None, feed="": Run(c, 0 if next(results) else 1, "E fail", "", 0.2))
+        monkeypatch.setattr(pipeline, "lint_problems", fake_lint(["calc_mod.py: имя не определено — b"], []))
         state = pipeline_lg.run_langgraph_pipeline("почини сложение", plan=fix_plan)
         assert state.steps.count("edit") == 1
         assert state.extra["tests_green"]
@@ -5379,18 +5155,24 @@ class TestRealFix:
         print(f"\nМаршрут: {state.trace()}")
         print(f"Форма правки: {state.extra.get('edit_form')}, починок: {state.extra.get('attempt')}")
         print(f"Итог: {state.answer}")
-        assert state.extra.get("tests_green"), state.extra.get("failure")
+        # Судит замер, а не агент: узел проверки смотрит только на то,
+        # что видно без знания задачи, и «линтер молчит» решением задачи
+        # не является.
+        assert task_is_done(broken_project), state.extra.get("failure")
         assert "a + b" in (broken_project / "calc.py").read_text(encoding="utf-8")
 
-    def test_провал_откатывает_файлы(self, broken_project):
-        """Задача без решения: агент должен вернуть файл, а не оставить огрызок."""
+    def test_неисправимая_правка_откатывает_файлы(self, broken_project):
+        """Провал проверки должен вернуть файл, а не оставить огрызок.
+
+        Задача подобрана под то, что проверка теперь ловит, — имя
+        из ниоткуда. «Тест требует невозможного» сюда больше не годится:
+        линтеру такая правка ничем не мешает, и прогон будет зелёным.
+        """
         before = (broken_project / "calc.py").read_text(encoding="utf-8")
-        (broken_project / "test_calc.py").write_text(
-            "from calc import add\n\n\ndef test_add():\n    assert add(2, 2) == 5\n", encoding="utf-8"
-        )
         state = run_pipeline(
-            "Сделай так, чтобы add(2, 2) возвращало 4, не меняя тест.",
-            plan=Plan("почини", [Step("edit", "calc.py", "исправить сложение"), Step("test", "", "тесты")]),
+            "В calc.py в функции add верни unknown_thing вместо суммы.",
+            plan=Plan("правка", [Step("edit", "calc.py", "вернуть unknown_thing"),
+                                 Step("test", "", "проверка")]),
         )
         if not state.extra.get("tests_green"):
             assert (broken_project / "calc.py").read_text(encoding="utf-8") == before
@@ -5475,6 +5257,32 @@ def make_task_project(root, source, test_source, long_file=False):
     guard.set_policy(root=root, mode=guard.AUTO, dry_run=False)
     guard.forget_changes()
     return root
+
+
+def task_is_done(root) -> bool:
+    """Сделана ли работа — по мнению ЗАМЕРА, а не агента.
+
+    Агент с некоторых пор проверяет только то, что можно проверить,
+    не зная задачи: разбирается ли файл и нет ли в нём имён из ниоткуда.
+    Для замера этого мало — он как раз про то, получилось ли решить
+    ЗАДАЧУ, а её условия замер знает: он сам их и написал.
+
+    Судить своим кодом правильнее и по другой причине. Пока судьёй был
+    флаг агента, замер наследовал его слепые пятна: программа, которая
+    падала в свой же `except` и выходила с кодом 0, считалась зелёной
+    и у агента, и в отчёте замера.
+
+    Все задачи замеров самодостаточны — им не нужны ни файлы, ни сеть,
+    ни ввод с клавиатуры, — поэтому здесь запуск честен: есть тесты,
+    прогоняем их; нет — запускаем саму программу.
+    """
+    root = Path(root)
+    if list(root.glob("test_*.py")):
+        return suite_passed(execute("python -m pytest -q --no-header", timeout=180.0))
+    entries = [p for p in sorted(root.glob("*.py")) if not p.name.startswith("test_")]
+    if not entries:
+        return False
+    return execute([interpreter(), entries[0].name], timeout=60.0).ok
 
 
 def rounds(times, tasks):
@@ -5671,9 +5479,9 @@ class TestPlannerModels:
                     clean += 1
                 if not [p for p in problems if p != NO_FINAL_TEST]:
                     fair += 1
-                state = run_pipeline(task, plan=plan)
+                run_pipeline(task, plan=plan)
                 spent += time.monotonic() - started_at
-                if state.extra.get("tests_green"):
+                if task_is_done(guard.get_workspace()):
                     green += 1
             report.append((label, green, with_edit, clean, fair, spent))
 
@@ -5868,16 +5676,16 @@ class TestCoderModels:
                             tmp_path / f"{folder_name(model)}-fix{attempt}-{name}", source, test_source
                         )
                         started_at = time.monotonic()
-                        state = run_pipeline(task, plan=bare_plan(task))
+                        run_pipeline(task, plan=bare_plan(task))
                         fixed_spent += time.monotonic() - started_at
-                        fixed += bool(state.extra.get("tests_green"))
+                        fixed += task_is_done(guard.get_workspace())
 
                     for name, task in SCRATCH_TASKS:
                         make_empty_project(tmp_path / f"{folder_name(model)}-new{attempt}-{name}")
                         started_at = time.monotonic()
-                        state = run_pipeline(task)
+                        run_pipeline(task)
                         scratch_spent += time.monotonic() - started_at
-                        scratch += bool(state.extra.get("tests_green"))
+                        scratch += task_is_done(guard.get_workspace())
             report.append((model, fixed, fixed_spent, scratch, scratch_spent))
 
         fix_total = len(FIX_TASKS) * self.ROUNDS
@@ -6326,7 +6134,7 @@ class TestWriteMode:
                         started_at = time.monotonic()
                         state = run_pipeline(task)
                         spent += time.monotonic() - started_at
-                        green += bool(state.extra.get("tests_green"))
+                        green += task_is_done(guard.get_workspace())
                         # Провал провалу рознь, и различать их обязательно.
                         # «Файл не написался» — беда механическая: ответ
                         # не разобрался, определения потерялись, вышло

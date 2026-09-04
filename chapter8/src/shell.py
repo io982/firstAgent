@@ -373,6 +373,50 @@ def run_lint(path: str = ".") -> str:
     return run.summary()
 
 
+def lint_problems(path: str) -> list[str]:
+    """Что линтер видит в файле: сломанный синтаксис и неопределённые имена.
+
+    Это всё, что можно сказать о файле, НЕ ЗНАЯ задачи, — и потому
+    единственное, чему конвейер верит как приговору. Обе беды здесь
+    универсальные: файл, который не разбирается, сломан при любой
+    задаче, и имя, которого нигде нет, — тоже.
+
+    Синтаксис спрашивается у того же ruff, а не у `py_compile`: линтер
+    его и так проверяет по дороге, а два ответа на один вопрос рано
+    или поздно разъезжаются. Важно, что `--select F821` синтаксические
+    ошибки НЕ отключает — они приезжают отдельной строкой
+    `invalid-syntax`, и без их разбора сломанный файл выглядел бы
+    чистым: правил в нём линтер просто не проверял.
+
+    Пустой список, если ruff не установлен. Проверка НЕОБЯЗАТЕЛЬНАЯ:
+    она делает агента строже там, где линтер есть, и не ломает главу
+    там, где его нет.
+    """
+    if not path.endswith(".py"):
+        return []
+    try:
+        where = guard.relative(guard.resolve_path(path))
+    except guard.OutsideWorkspace:
+        return []
+
+    run = execute([interpreter(), "-m", "ruff", "check", "--select", "F821",
+                   "--no-cache", "--output-format", "concise", where], timeout=60.0)
+    if run.code == 127 or "No module named" in run.text():
+        return []
+
+    problems: list[str] = []
+    for line in run.text().splitlines():
+        if "invalid-syntax" in line:
+            problem = f"{where} не разбирается: {line.split('invalid-syntax:')[-1].strip()}"
+        elif "F821" in line and "`" in line:
+            problem = f"{where}: имя не определено — {line.split('`')[1]}"
+        else:
+            continue
+        if problem not in problems:
+            problems.append(problem)
+    return problems
+
+
 def undefined_names(path: str) -> list[str]:
     """Имена, которые файл использует, но нигде не определяет.
 
