@@ -80,6 +80,7 @@ from chapter8.src.planner import (
     FROM_FALLBACK,
     FROM_MODEL,
     MAX_STEPS,
+    NO_FINAL_TEST,
     PLAN_ACTIONS,
     Plan,
     Step,
@@ -5555,14 +5556,23 @@ class TestPlannerModels:
 
     Обязательный замер главы. Он отвечает на вопрос, ради которого
     планировщик вынесен в отдельный модуль с отдельной моделью:
-    окупается ли планирование, и окупается ли вторая модель под него.
+    нужно ли планирование вообще и нужна ли вторая модель под него.
 
     Мерится ТОЛЬКО на задачах правки, и это ограничение принципиальное.
     На задачах с нуля сравнивать не с чем: плана из кода там не бывает,
     придумать имена файлов эвристикой нельзя. Переносить вывод «код
     выигрывает» на работу с нуля поэтому нельзя — там у кода нет ответа,
     а не плохой ответ.
+
+    Колонок с претензиями две, и вторая появилась после разбора самого
+    замера. Претензию «последний шаг не test» план из кода не получает
+    НИКОГДА — он этим шагом и заканчивается по построению. То есть одна
+    из строк валидатора автоматически ставит коду плюс, а модели минус,
+    ничего при этом не измеряя. Вторая колонка считает претензии без
+    неё; расхождение между колонками и есть величина подыгрывания.
     """
+
+    ROUNDS = 2
 
     def test_план_окупается_или_нет(self, tmp_path, warm_model):
         sources = [("без плана (файл назван)", bare_plan), ("план из кода", fallback_plan)]
@@ -5572,10 +5582,10 @@ class TestPlannerModels:
 
         report = []
         for label, build in sources:
-            green = with_edit = clean = 0
+            green = with_edit = clean = fair = 0
             spent = 0.0
-            for name, source, test_source, task in FIX_TASKS:
-                make_task_project(tmp_path / f"{folder_name(label)}-{name}", source, test_source)
+            for attempt, (name, source, test_source, task) in rounds(self.ROUNDS, FIX_TASKS):
+                make_task_project(tmp_path / f"{folder_name(label)}-{attempt}-{name}", source, test_source)
                 started_at = time.monotonic()
                 plan = build(task)
                 # Две характеристики самого плана, до его исполнения.
@@ -5583,20 +5593,26 @@ class TestPlannerModels:
                 # довести тесты до зелёных, сколько его ни выполняй.
                 if any(step.action in ("edit", "create") for step in plan.steps):
                     with_edit += 1
-                if not validate_plan(plan):
+                problems = validate_plan(plan)
+                if not problems:
                     clean += 1
+                if not [p for p in problems if p != NO_FINAL_TEST]:
+                    fair += 1
                 state = run_pipeline(task, plan=plan)
                 spent += time.monotonic() - started_at
                 if state.extra.get("tests_green"):
                     green += 1
-            report.append((label, green, with_edit, clean, spent))
+            report.append((label, green, with_edit, clean, fair, spent))
 
+        total = self.ROUNDS * len(FIX_TASKS)
         print("\n\nЗАМЕР 2: планировщик на задачах ПРАВКИ")
-        print(f"Задач: {len(FIX_TASKS)}, модель кода: {pipeline.coder_model()}")
-        print(f"{'планировщик':<28}{'зелёные':>10}{'есть правка':>14}{'без претензий':>16}{'секунд':>10}")
-        for label, green, with_edit, clean, spent in report:
-            print(f"{label:<28}{green:>7}/{len(FIX_TASKS):<2}"
-                  f"{with_edit:>11}/{len(FIX_TASKS):<2}{clean:>13}/{len(FIX_TASKS):<2}{spent:>10.1f}")
+        print(f"Задач: {len(FIX_TASKS)}, прогонов каждой: {self.ROUNDS}, "
+              f"модель кода: {pipeline.coder_model()}")
+        print(f"{'планировщик':<28}{'зелёные':>10}{'есть правка':>14}"
+              f"{'без претензий':>16}{'без придирки':>15}{'секунд':>10}")
+        for label, green, with_edit, clean, fair, spent in report:
+            print(f"{label:<28}{green:>7}/{total:<2}{with_edit:>11}/{total:<2}"
+                  f"{clean:>13}/{total:<2}{fair:>12}/{total:<2}{spent:>10.1f}")
 
         assert report, "замер не собрал ни одной строки"
 
