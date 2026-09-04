@@ -79,6 +79,15 @@ DENY = "deny"    # запретить всё, что меняет диск
 # который умеет запускать код, умеет запускать код.
 NARROW_ALLOWED = ("python", "pytest", "ruff", "git", "pip")
 
+# Каталоги, в которые агент не заходит. Не запрет, а гигиена: в `.git`
+# и `__pycache__` лежат не исходники, а их производные, и попадание их
+# в контекст стоит места и не даёт ничего. Живёт здесь, а не в файловых
+# инструментах, потому что тем же списком пользуется поиск conftest.py
+# ниже, а `guard` не имеет права импортировать то, что импортирует его.
+SKIP_DIRS = frozenset(
+    {".git", "__pycache__", ".venv", "venv", "node_modules", "chroma_db", ".pytest_cache", ".ruff_cache"}
+)
+
 # `allowed = ANY_COMMAND` означает «белого списка нет».
 #
 # И это умолчание главы. Решение осознанное и стоит того, чтобы назвать
@@ -185,9 +194,10 @@ def set_policy(**changes) -> Policy:
     global _POLICY
     if changes.get("root") is not None:
         changes["root"] = Path(changes["root"]).resolve()
-        # Каталог сменился — прежний ответ «репозиторий или нет»
-        # к новому отношения не имеет.
+        # Каталог сменился — прежние ответы про него к новому отношения
+        # не имеют: ни «репозиторий или нет», ни разрешение на conftest.py.
         history.forget_available()
+        forget_conftest()
     _POLICY = replace(_POLICY, **changes)
     return _POLICY
 
@@ -307,6 +317,73 @@ def verdict_message(verdict: str, action: str) -> str:
     if verdict == DRY:
         return f"Сухой прогон: {action} — не выполнено, диск не тронут."
     return f"Отказано: {action} — человек не разрешил это действие."
+
+
+# Ответ человека про conftest.py, по каталогам. Спрашивается ОДИН раз
+# на каталог и запоминается — в том числе отказ. Вопрос на каждом круге
+# починки превратился бы ровно в ту кнопку «y», которую жмут не глядя,
+# а ради неё исключение для run_tests и заводилось.
+_CONFTEST: dict[str, bool] = {}
+
+# Сколько файлов conftest.py показывать человеку. Больше трёх — это
+# уже не «посмотрите, что вы запускаете», а стена текста.
+CONFTEST_SHOWN = 3
+
+
+def conftest_files() -> list[Path]:
+    """Файлы conftest.py в рабочем каталоге и под ним."""
+    try:
+        found = sorted(_POLICY.root.rglob("conftest.py"))
+    except OSError:
+        return []
+    return [p for p in found if not any(part in SKIP_DIRS for part in p.parts)]
+
+
+def allow_pytest() -> tuple[bool, str]:
+    """Можно ли запускать pytest здесь. Возвращает решение и объяснение.
+
+    Дыра, которую это закрывает, названа в главе прямым текстом.
+    `run_tests` намеренно не спрашивает подтверждения — в конвейере он
+    зовётся на каждом круге починки, и вопрос там стал бы кнопкой,
+    которую жмут не глядя. Но pytest при старте ИМПОРТИРУЕТ
+    `conftest.py` проекта, а это произвольный код: `os.system`,
+    `shutil.rmtree`, запрос в сеть — всё, что автор файла туда написал.
+    То есть исключение, сделанное ради удобства, пропускало исполнение
+    чужого кода без единого вопроса.
+
+    Компромисс: вопрос задаётся, только если `conftest.py` в каталоге
+    ЕСТЬ, и только один раз на каталог. Нет файла — нечего и спрашивать,
+    прогон идёт как раньше. Ответ запоминается, включая отказ: смена
+    каталога его сбрасывает.
+    """
+    found = conftest_files()
+    if not found:
+        return True, ""
+
+    key = str(_POLICY.root)
+    if key in _CONFTEST:
+        return _CONFTEST[key], "" if _CONFTEST[key] else _conftest_refusal()
+
+    names = ", ".join(relative(p) for p in found[:CONFTEST_SHOWN])
+    if len(found) > CONFTEST_SHOWN:
+        names += f" и ещё {len(found) - CONFTEST_SHOWN}"
+    verdict = check(
+        "запустить pytest в этом каталоге",
+        f"pytest выполнит {names} — это обычный Python-код, и он запустится "
+        "до первого теста. Спрашиваю один раз на каталог.",
+    )
+    _CONFTEST[key] = verdict == ALLOW
+    return _CONFTEST[key], "" if verdict == ALLOW else verdict_message(verdict, "запуск pytest")
+
+
+def _conftest_refusal() -> str:
+    """Почему pytest не запускается — для второго и следующих раз."""
+    return "Отказано: запуск pytest — человек не разрешил выполнять conftest.py этого каталога."
+
+
+def forget_conftest() -> None:
+    """Забывает ответы про conftest.py. Нужно смене каталога и тестам."""
+    _CONFTEST.clear()
 
 
 # --------------------------------------------------------------------

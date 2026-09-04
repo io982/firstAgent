@@ -34,7 +34,7 @@ from chapter7.src.agents import SPECIALISTS, Team
 from chapter7.src.graph import State
 from chapter7.src.models import using_model
 from chapter8.agent import handle
-from chapter8.src import codemap, env, guard, history, pipeline, pipeline_lg, review
+from chapter8.src import codemap, env, guard, history, pipeline, pipeline_lg, review, shell
 from chapter8.src import planner as planner_module
 from chapter8.src.edits import (
     ANCHOR,
@@ -100,6 +100,7 @@ from chapter8.src.shell import (
     execute,
     first_error,
     interpreter,
+    run_tests,
     suite_passed,
     undefined_names,
 )
@@ -137,6 +138,7 @@ def clean_policy(tmp_path, monkeypatch):
     yield
     guard.forget_changes()
     guard.reset_policy()
+    guard.forget_conftest()
     history.forget_available()
 
 
@@ -3144,6 +3146,129 @@ class TestVerifyModes:
         state = started(Plan("з", []), touched=["app.py", "helper.py"])
         pipeline.node_verify(state)
         assert "helper.py" in seen[0], "запускается последний написанный"
+
+
+class TestConftestGate:
+    """Подтверждение перед pytest — но только там, где есть conftest.py.
+
+    Дыра, которую закрывает этот вопрос: `run_tests` намеренно не
+    спрашивает разрешения, потому что в конвейере зовётся на каждом
+    круге починки. А pytest выполняет `conftest.py` проекта до первого
+    теста, и это произвольный код. Вопрос задаётся один раз на каталог
+    и только при живом файле.
+    """
+
+    def ask(self, answer, seen=None):
+        """Ставит режим «спрашивать» с заранее известным ответом."""
+        def confirm(action, detail):
+            if seen is not None:
+                seen.append((action, detail))
+            return answer
+        guard.set_policy(mode=guard.ASK, confirm=confirm)
+
+    def test_без_conftest_вопроса_нет(self, workspace):
+        seen = []
+        self.ask(False, seen)
+        allowed, why = guard.allow_pytest()
+        assert allowed and why == ""
+        assert seen == [], "спрашивать не о чем: conftest.py в каталоге нет"
+
+    def test_с_conftest_спрашивают_и_показывают_файл(self, workspace):
+        (workspace / "conftest.py").write_text("import os\n", encoding="utf-8")
+        seen = []
+        self.ask(True, seen)
+
+        allowed, _ = guard.allow_pytest()
+
+        assert allowed
+        assert len(seen) == 1
+        assert "conftest.py" in seen[0][1]
+
+    def test_отказ_не_запускает_pytest(self, workspace, monkeypatch):
+        (workspace / "conftest.py").write_text("import os\n", encoding="utf-8")
+        (workspace / "test_calc.py").write_text("def test_ok():\n    assert True\n", encoding="utf-8")
+        launched = []
+        monkeypatch.setattr(shell, "execute",
+                            lambda c, timeout=None, feed="": launched.append(c) or Run(c, 0, "", "", 0.0))
+        self.ask(False)
+
+        answer = run_tests()
+
+        assert "Отказано" in answer
+        assert launched == [], "pytest не должен был запуститься"
+
+    def test_спрашивают_один_раз_на_каталог(self, workspace):
+        (workspace / "conftest.py").write_text("import os\n", encoding="utf-8")
+        seen = []
+        self.ask(True, seen)
+
+        guard.allow_pytest()
+        guard.allow_pytest()
+        guard.allow_pytest()
+
+        # Вопрос на каждом круге починки превратился бы в кнопку,
+        # которую жмут не глядя, — ровно то, ради чего исключение
+        # для run_tests и заводилось.
+        assert len(seen) == 1
+
+    def test_отказ_тоже_запоминается(self, workspace):
+        (workspace / "conftest.py").write_text("import os\n", encoding="utf-8")
+        seen = []
+        self.ask(False, seen)
+
+        first, why = guard.allow_pytest()
+        second, why_again = guard.allow_pytest()
+
+        assert not first and not second
+        assert len(seen) == 1
+        assert why_again, "второй раз тоже надо объяснить, почему тестов не будет"
+
+    def test_смена_каталога_сбрасывает_ответ(self, workspace, tmp_path):
+        (workspace / "conftest.py").write_text("import os\n", encoding="utf-8")
+        seen = []
+        self.ask(True, seen)
+        guard.allow_pytest()
+
+        other = tmp_path / "другой"
+        other.mkdir()
+        (other / "conftest.py").write_text("import os\n", encoding="utf-8")
+        guard.set_policy(root=other)
+        guard.allow_pytest()
+
+        assert len(seen) == 2, "про новый каталог спрашивают заново"
+
+    def test_conftest_в_подкаталоге_виден(self, workspace):
+        nested = workspace / "tests"
+        nested.mkdir()
+        (nested / "conftest.py").write_text("import os\n", encoding="utf-8")
+        assert [guard.relative(p) for p in guard.conftest_files()] == ["tests/conftest.py"]
+
+    def test_conftest_в_служебном_каталоге_не_считается(self, workspace):
+        junk = workspace / ".venv"
+        junk.mkdir()
+        (junk / "conftest.py").write_text("import os\n", encoding="utf-8")
+        assert guard.conftest_files() == []
+        assert guard.allow_pytest() == (True, "")
+
+    def test_отказ_в_конвейере_это_нечем_проверить(self, project, monkeypatch):
+        """Отказ не должен выглядеть как сломанная работа.
+
+        Разница принципиальная: «проверили, и сломано» ведёт к откату,
+        а «нечем проверить» оставляет сделанное на диске. Стереть
+        правильно написанный код за то, что человек не разрешил
+        запускать чужой conftest.py, — худший из возможных исходов.
+        """
+        (project / "conftest.py").write_text("import os\n", encoding="utf-8")
+        monkeypatch.setattr(pipeline, "execute", fake_run(green=True))
+        self.ask(False)
+
+        state = started(Plan("з", []), touched=["calc_mod.py"])
+        pipeline.node_verify(state)
+
+        assert state.extra["verified_by"] == "нечем"
+        assert state.extra["unverifiable"]
+        assert not state.extra["tests_green"]
+        assert pipeline.edge_after_verify(state) == pipeline.DONE
 
 
 class TestInteractiveProgram:

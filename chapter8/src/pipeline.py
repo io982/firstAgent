@@ -1503,6 +1503,22 @@ def node_verify(state: State) -> State:
         return state
 
     if tests or target:
+        # Человек может не разрешить запуск pytest — он делает это
+        # ровно тогда, когда в каталоге лежит conftest.py, то есть
+        # когда pytest выполнит чужой код до первого теста.
+        #
+        # Отказ — это «нечем проверить», а НЕ «проверили, и сломано».
+        # Разница принципиальная: второе ведёт к откату, и работа,
+        # сделанная правильно, была бы стёрта за то, что человек
+        # отказался запускать чужой conftest.py.
+        allowed, why = guard.allow_pytest()
+        if not allowed:
+            state.extra["verified_by"] = "нечем"
+            state.extra["unverifiable"] = True
+            state.extra["tests_green"] = False
+            state.extra["failure"] = why
+            return state
+
         where = f" {target}" if target else ""
         run = execute(f"python -m pytest{where} -q --no-header", timeout=max(guard.get_policy().timeout, 180.0))
         green = suite_passed(run)
