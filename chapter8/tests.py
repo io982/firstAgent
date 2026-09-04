@@ -2157,7 +2157,7 @@ class TestSkeleton:
 class TestWriteTransportChoice:
     """Как модель присылает файл: полем JSON или обычным текстом.
 
-    Замер 11 показал, что схема на длинном ответе мешает: уровней
+    Замер 10 показал, что схема на длинном ответе мешает: уровней
     кавычек три — JSON, исходник, литерал внутри исходника, — и модель
     на 3B теряет один. Ломается при этом сам конверт: `json.loads`
     падает с «Unterminated string» ещё до того, как мы посмотрим
@@ -2165,7 +2165,7 @@ class TestWriteTransportChoice:
     """
 
     def test_по_умолчанию_текстом(self):
-        """Решение замера 11: текст выиграл у всех пяти моделей."""
+        """Решение замера 10: текст выиграл у всех пяти моделей."""
         assert pipeline.WRITE_TRANSPORT == "text"
 
     def test_текстом_схема_не_навязывается(self, workspace, monkeypatch):
@@ -5193,7 +5193,7 @@ class TestFormAccuracy:
         print("\n\nЗАМЕР 1: три формы правки на одном наборе задач")
         print(f"Модель: {base.MODEL}, задач: {len(FIX_TASKS)}, прогонов: {rounds}")
         for long_file in (False, True):
-            where = "файл из 10 функций" if long_file else "файл из одной функции"
+            where = "файл из 9 функций" if long_file else "файл из одной функции"
             print(f"\n{where}:")
             print(f"{'форма':<10}{'применилась':>14}{'тесты зелёные':>16}{'секунд':>10}")
             for form in EDIT_FORMS:
@@ -5696,7 +5696,7 @@ QUOTING_TASKS = [
 
 @pytest.mark.slow
 class TestWriteTransport:
-    """Замер 11: файл полем JSON против файла обычным текстом.
+    """Замер 10: файл полем JSON против файла обычным текстом.
 
     Замер бьёт по главному приёму главы, и в этом его смысл. Схема
     выигрывала четыре раза подряд — форма правки, имя файла, выбор
@@ -5754,7 +5754,7 @@ class TestWriteTransport:
 
         tricky_total = len(QUOTING_TASKS) * self.ROUNDS
         simple_total = len(simple) * self.ROUNDS
-        print("\n\nЗАМЕР 11: как доставлять файл — полем JSON или текстом")
+        print("\n\nЗАМЕР 10: как доставлять файл — полем JSON или текстом")
         print(f"Задач с кавычками: {len(QUOTING_TASKS)}, обычных: {len(simple)}, "
               f"прогонов каждой: {self.ROUNDS}")
         print(f"{'модель':<26}{'способ':<9}{'с кавычками':>13}{'обычные':>10}"
