@@ -17,6 +17,7 @@
 """
 
 import json
+import math
 import os
 import shutil
 import subprocess
@@ -3320,6 +3321,78 @@ class TestInteractiveProgram:
         assert "с подставленным вводом" in state.extra["verified_by"]
         assert seen[0][0][-1] == "app.py", "запускается файл, а не импортируется модуль"
         assert state.extra["tests_green"]
+
+    # ---- ввод годится не только квадратному уравнению -----------------
+
+    def test_вырожденных_чисел_во_вводе_нет(self):
+        """Ноль, единица и отрицательные числа ломают исправные программы.
+
+        Живой прогон, стоивший трёх откачённых правильных программ:
+        первые наборы были подобраны под квадратное уравнение и
+        начинались с единицы. `math.log(x, 1)` — деление на `log(1)`,
+        то есть на ноль, и калькулятор логарифмов объявлялся сломанным
+        трижды подряд, на двух разных моделях.
+        """
+        for numbers in pipeline.SCRIPTED_NUMBERS:
+            for value in numbers:
+                assert value > 1, f"{value} в наборе {numbers}: вырожденный вход"
+
+    def test_настоящий_логарифм_проверку_проходит(self, workspace):
+        """Регрессия на тот самый живой прогон."""
+        (workspace / "log_app.py").write_text(
+            "import math\n"
+            "base = float(input('Введите основание: '))\n"
+            "number = float(input('Введите число: '))\n"
+            "print(math.log(number, base))\n",
+            encoding="utf-8",
+        )
+        state = started(Plan("з", [Step("create", "log_app.py", "")]), touched=["log_app.py"])
+        pipeline.node_verify(state)
+
+        assert state.extra["tests_green"], state.extra["failure"]
+
+    def test_первый_набор_даёт_настоящий_ответ(self):
+        """Основание 2 и число 8 — это логарифм 3, а не ошибка области.
+
+        Проверка, которая ни разу не досчитывает до ответа, ничего
+        не проверяет: живой прогон принял программу, где все три набора
+        уходили в `except` и печатали сообщение об ошибке.
+        """
+        base, number, _ = pipeline.SCRIPTED_NUMBERS[0]
+        assert math.log(number, base) == 3
+
+    def test_обе_ветки_дискриминанта_покрыты(self):
+        """Разнообразие веток держится дискриминантом, а не вырожденностью."""
+        signs = {b * b - 4 * a * c > 0 for a, b, c in pipeline.SCRIPTED_NUMBERS}
+        assert signs == {True, False}, "нужен и набор с корнями, и набор без них"
+
+    def test_ошибка_называет_подставленный_ввод(self, workspace):
+        """Без этого починка чинит вслепую.
+
+        Живой прогон: модель получила «ZeroDivisionError» и ничего
+        больше — про то, что основание логарифма подали МЫ, в задании
+        не было ни слова, и два круга ушли на починку исправного кода.
+        """
+        (workspace / "bad.py").write_text(
+            "value = float(input('число: '))\nprint(1 / (value - value))\n", encoding="utf-8"
+        )
+        state = started(Plan("з", [Step("create", "bad.py", "")]), touched=["bad.py"])
+        pipeline.node_verify(state)
+
+        assert not state.extra["tests_green"]
+        assert "с подставленным вводом" in state.extra["failure"]
+        assert pipeline.shown_input(pipeline.SCRIPTED_NUMBERS[0]) in state.extra["failure"]
+        assert "ZeroDivisionError" in state.extra["failure"]
+
+    def test_отчёт_человеку_тоже_называет_числа(self, workspace):
+        """Прошли все наборы — в отчёте все: назвать один было бы неправдой."""
+        (workspace / "app.py").write_text("print(int(input()) * 2)\n", encoding="utf-8")
+        state = started(Plan("з", [Step("create", "app.py", "")]), touched=["app.py"])
+        pipeline.node_verify(state)
+
+        assert state.extra["tests_green"]
+        for numbers in pipeline.SCRIPTED_NUMBERS:
+            assert pipeline.shown_input(numbers) in state.extra["verified_by"]
 
     def test_подставляются_только_числа(self):
         """Пустая строка в конце ввода ломала программу с циклом.

@@ -205,19 +205,60 @@ def _feed(numbers: tuple[float | int, ...], times: int = 8) -> str:
     return "".join(f"{value}\n" for _ in range(times) for value in numbers)
 
 
-SCRIPTED_INPUT = _feed((1, 2, 3))
-
 # Наборов НЕСКОЛЬКО, и это не запас, а необходимость. Один запуск
 # проходит одной веткой, и беда в соседней остаётся невидимой. Живой
 # прогон: приложение считало корни через `math.sqrt` без `import math`,
-# набор «1 2 3» дал отрицательный дискриминант, ветка с корнями
+# набор чисел дал отрицательный дискриминант, ветка с корнями
 # не выполнилась — и агент отчитался «Готово» о программе, которая
 # падает на первом же уравнении с корнями.
-SCRIPTED_INPUTS = (
-    SCRIPTED_INPUT,
-    _feed((1, -3, 2)),   # два корня
-    _feed((1, 2, 1)),    # один корень
+#
+# А вот КАКИЕ это числа — вопрос, который стоил трёх откачённых
+# правильных программ. Первые наборы были подобраны под одну задачу
+# главы, квадратное уравнение: `1, -3, 2` — это коэффициенты с корнями
+# 1 и 2, и единица стояла первой во всех трёх. Потом пришёл живой
+# прогон с калькулятором логарифмов. `math.log(x, 1)` — это деление
+# на `log(1)`, то есть на ноль; проверка объявила исправную программу
+# сломанной, починка два круга чинила несуществующую беду, и всё
+# сделанное откатилось. Трижды подряд, на двух разных моделях.
+#
+# Отсюда правило, которому наборы подчиняются теперь: **каждое число
+# годится на вход любой школьной задаче**. Ни нуля (деление), ни
+# единицы (основание логарифма), ни отрицательных (корень, логарифм).
+# Разнообразие веток при этом сохраняется дискриминантом, а не
+# вырожденными значениями.
+SCRIPTED_NUMBERS = (
+    (2, 8, 3),   # логарифм: основание 2, число 8 — ответ ровно 3;
+                 # как коэффициенты: дискриминант 40, два корня
+    (3, 5, 7),   # дискриминант -59: ветка «корней нет»
+    (2, 5, 2),   # дискриминант 9: два целых корня
 )
+
+SCRIPTED_INPUTS = tuple(_feed(numbers) for numbers in SCRIPTED_NUMBERS)
+SCRIPTED_INPUT = SCRIPTED_INPUTS[0]
+
+
+def shown_input(numbers: tuple[float | int, ...]) -> str:
+    """Как подставленный ввод называют человеку и модели.
+
+    Нужна потому, что без этой строки провал проверки не разобрать.
+    Живой прогон: модель получила «ZeroDivisionError: float division
+    by zero» и ничего больше — про то, что основание логарифма подали
+    МЫ, в тексте ошибки не было ни слова. Она честно попыталась чинить
+    программу, которая не сломана.
+    """
+    return ", ".join(str(value) for value in numbers)
+
+
+def with_input_note(failure: str, numbers: tuple[float | int, ...]) -> str:
+    """Дописывает к ошибке то, с каким вводом программа падала.
+
+    Приписка идёт ПЕРЕД ошибкой, а не после: модель читает задание
+    сверху вниз, и «программа запущена с вводом …» должно попасться
+    ей раньше, чем traceback, который она бросится чинить.
+    """
+    if not failure:
+        return failure
+    return f"программа запущена с подставленным вводом ({shown_input(numbers)}) и упала:\n{failure}"
 
 # Ошибка, которая означает «ввода не хватило», а не «программа сломана».
 INPUT_RAN_OUT = "EOFError"
@@ -1115,10 +1156,10 @@ def _seen_error(state: State, path: str) -> str:
     entry = path if path.endswith(".py") else _entry_point(state)
     if not entry:
         return ""
-    run = _run_with_inputs(entry, max(guard.get_policy().timeout, 60.0))
+    run, numbers = _run_with_inputs(entry, max(guard.get_policy().timeout, 60.0))
     if run.ok or INPUT_RAN_OUT in run.text():
         return ""
-    return first_error(run.text())
+    return with_input_note(first_error(run.text()), numbers)
 
 
 def _step_edit(step, state: State) -> tuple[bool, str]:
@@ -1549,8 +1590,17 @@ def node_verify(state: State) -> State:
             # Ввод кончился (EOFError) — это НАША беда, а не программы:
             # мы дали меньше строк, чем она спросила. Такой ответ
             # проваливать нельзя, и ниже он разбирается отдельно.
-            run = _run_with_inputs(entry, limit)
-            state.extra["verified_by"] = f"запуск {entry} с подставленным вводом"
+            run, numbers = _run_with_inputs(entry, limit)
+            # Числа называются в отчёте, а не подразумеваются. Человек,
+            # читающий «Проверено: запуск с подставленным вводом», не
+            # может знать, что подставили именно эти, — а от них зависит,
+            # что означает и провал, и успех. Провалился один набор —
+            # называем его; прошли все — называем все.
+            state.extra["fed_input"] = numbers
+            shown = shown_input(numbers) if numbers else "; ".join(
+                shown_input(each) for each in SCRIPTED_NUMBERS
+            )
+            state.extra["verified_by"] = f"запуск {entry} с подставленным вводом ({shown})"
             if not run.ok and INPUT_RAN_OUT in run.text():
                 run = execute([interpreter(), "-m", "py_compile", entry], timeout=limit)
                 state.extra["verified_by"] = (
@@ -1640,7 +1690,14 @@ def node_verify(state: State) -> State:
             state.extra["doubt"] = "" if done or not problems else review.report(problems)
 
     state.extra["tests_green"] = green
-    state.extra["failure"] = "" if green else first_error(run.text())
+    # К ошибке запуска приписывается ввод, с которым программа падала.
+    # Без него починка чинит вслепую: живой прогон показал модели
+    # «ZeroDivisionError» от логарифма по основанию 1 — и та два круга
+    # искала ошибку в программе, которая была исправна.
+    failure = "" if green else first_error(run.text())
+    if failure and state.extra.get("fed_input"):
+        failure = with_input_note(failure, state.extra["fed_input"])
+    state.extra["failure"] = failure
     state.extra["verify_output"] = clip(run.text(), 800)
     state.extra["verify_seconds"] = round(run.seconds, 1)
     return state
@@ -1711,19 +1768,28 @@ def asks_input_on_import(path: str) -> bool:
     return False
 
 
-def _run_with_inputs(entry: str, limit: float) -> Run:
-    """Запускает программу несколькими наборами ввода. Первый провал — ответ.
+def _run_with_inputs(entry: str, limit: float) -> tuple[Run, tuple[float | int, ...] | None]:
+    """Запускает программу наборами ввода. Возвращает исход и виноватый набор.
 
-    Несколькими, потому что один набор проходит одной веткой. Успех
-    всех наборов не доказывает, что программа верна, но провал любого
-    доказывает, что сломана, — а это ровно то, что нужно проверке.
+    Несколькими наборами, потому что один запуск проходит одной веткой.
+    Успех всех наборов не доказывает, что программа верна, но провал
+    любого доказывает, что сломана, — а это ровно то, что нужно проверке.
+
+    Набор возвращается вместе с исходом, и это не удобство. Провал без
+    него неразличим: «ZeroDivisionError» может означать и беду
+    в программе, и то, что мы подали ей единицу основанием логарифма.
+    Кто это читает — человек в отчёте и модель в задании на починку, —
+    должен видеть, с чем программу запускали.
+
+    Прошли все наборы — виноватого нет, и возвращается `None`: назвать
+    в отчёте один из трёх было бы неправдой, программа прошла все.
     """
     last = None
-    for feed in SCRIPTED_INPUTS:
+    for numbers, feed in zip(SCRIPTED_NUMBERS, SCRIPTED_INPUTS, strict=True):
         last = execute([interpreter(), entry], timeout=limit, feed=feed)
         if not last.ok:
-            return last
-    return last
+            return last, numbers
+    return last, None
 
 
 def _test_files(state: State) -> list[str]:
