@@ -35,6 +35,13 @@
 Журнал изменений (`record`, `rollback`) живёт тоже здесь, а не в файловых
 инструментах: откат нужен и конвейеру правки, и git-коммиту, и человеку,
 который передумал. Один журнал на всех.
+
+Хранится он в двух местах, и это не дублирование. Список в памяти
+отвечает на вопрос «что агент трогал в этом прогоне» — его спрашивают
+и конвейер, и git-коммит, и он обязан быть быстрым. Прежнее содержимое
+файлов уходит в git и в журнал на диске (см. history.py) — там оно
+переживает перезапуск агента, а список в памяти нет. Где git взять
+неоткуда, остаётся только список, и агент говорит об этом вслух.
 """
 from __future__ import annotations
 
@@ -43,6 +50,8 @@ import shlex
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from pathlib import Path
+
+from chapter8.src import history
 
 # --------------------------------------------------------------------
 # ИСХОДЫ ПРОВЕРКИ
@@ -176,6 +185,9 @@ def set_policy(**changes) -> Policy:
     global _POLICY
     if changes.get("root") is not None:
         changes["root"] = Path(changes["root"]).resolve()
+        # Каталог сменился — прежний ответ «репозиторий или нет»
+        # к новому отношения не имеет.
+        history.forget_available()
     _POLICY = replace(_POLICY, **changes)
     return _POLICY
 
@@ -400,6 +412,14 @@ def record(path: str | Path) -> None:
         return
     _CHANGES.append(Change(path=p, before=before))
 
+    # То же самое, но в git и на диск: список выше умрёт вместе
+    # с процессом, а журнал и снимок переживут. Если каталог не
+    # репозиторий, остаётся только список — и агент говорит об этом
+    # человеку, а не делает вид, что защищён (см. history.py).
+    root = get_workspace()
+    if history.available(root):
+        history.remember(root, p, before)
+
 
 def change_count() -> int:
     """Сколько правок записано в журнал — со всеми повторами.
@@ -423,8 +443,14 @@ def changed_files() -> list[Path]:
 
 
 def forget_changes() -> None:
-    """Очищает журнал. Вызывается после коммита и в начале нового прогона."""
+    """Очищает журнал. Вызывается после коммита и в начале нового прогона.
+
+    Ветку со снимком не трогает: она принадлежит человеку, а не
+    прогону. Прогон, который упал и не откатился, оставляет её в
+    репозитории — и вернуться к тому состоянию можно и без агента.
+    """
     _CHANGES.clear()
+    history.clear()
 
 
 def rollback() -> list[str]:
@@ -440,6 +466,15 @@ def rollback() -> list[str]:
     # оба снимка (чтобы дойти до самого раннего), а сказать о нём
     # человеку — один раз. «восстановлен код.py, восстановлен код.py»
     # выглядит как ошибка отката, хотя откат как раз отработал верно.
+    # Журнал на диске сильнее списка в памяти, и в этом весь смысл
+    # затеи: он переживает перезапуск агента. Список остаётся
+    # запасным ходом для каталогов без git.
+    root = get_workspace()
+    if history.pending(root):
+        done = history.restore(root)
+        _CHANGES.clear()
+        return done
+
     restored: dict[str, str] = {}
     for change in reversed(_CHANGES):
         name = relative(change.path)

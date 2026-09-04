@@ -34,7 +34,7 @@ from chapter7.src.agents import SPECIALISTS, Team
 from chapter7.src.graph import State
 from chapter7.src.models import using_model
 from chapter8.agent import handle
-from chapter8.src import codemap, env, guard, pipeline, pipeline_lg, review
+from chapter8.src import codemap, env, guard, history, pipeline, pipeline_lg, review
 from chapter8.src import planner as planner_module
 from chapter8.src.edits import (
     ANCHOR,
@@ -120,17 +120,24 @@ needs_git = pytest.mark.skipif(GIT is None, reason="git не установле�
 # ====================================================================
 
 @pytest.fixture(autouse=True)
-def clean_policy():
+def clean_policy(tmp_path, monkeypatch):
     """Возвращает политику доступа в исходное состояние после каждого теста.
 
     autouse — потому что забыть этот сброс легче всего в тесте, который
     его как раз и ломает: включил сухой прогон, проверил, вышел.
     Следующий тест тогда пишет в пустоту и падает по причине,
     не имеющей к нему отношения.
+
+    Здесь же во временный файл уводится журнал отката. Он глобальный
+    и лежит на диске, а `forget_changes()` его стирает — то есть без
+    подмены пути тесты стирали бы страховку разработчика, оставшуюся
+    от вчерашнего прогона агента.
     """
+    monkeypatch.setenv("AGENT_HISTORY_FILE", str(tmp_path / "history.json"))
     yield
     guard.forget_changes()
     guard.reset_policy()
+    history.forget_available()
 
 
 @pytest.fixture
@@ -1162,6 +1169,119 @@ class TestGitCommit:
         edit_file("sample.py", "return a + b", "return a - b")
         git_commit("правка агента")
         assert guard.changed_files() == []
+
+
+@needs_git
+class TestGitRollback:
+    """Откат через git: снимок веткой и журнал, переживающий перезапуск.
+
+    Главное здесь проверяется не тем, что откат вернул файл, — это
+    умел и прежний список в памяти. Проверяется то, чего он не умел:
+    пережить смерть процесса и не задеть работу человека.
+    """
+
+    def git(self, repo, *args):
+        return subprocess.run(
+            [GIT, *args], cwd=repo, capture_output=True, text=True,
+            encoding="utf-8", errors="replace",
+        ).stdout
+
+    def test_первая_запись_делает_снимок_веткой(self, repo):
+        assert history.branch(repo) == ""
+        edit_file("sample.py", "return a + b", "return a - b")
+        name = history.branch(repo)
+        assert name.startswith(history.BRANCH_PREFIX)
+        assert name in self.git(repo, "branch", "--list", name)
+
+    def test_прогон_без_правок_веток_не_оставляет(self, repo):
+        read_lines("sample.py", "1", "5")
+        assert history.branch(repo) == ""
+        assert history.BRANCH_PREFIX not in self.git(repo, "branch")
+
+    def test_откат_работает_после_потери_памяти(self, repo):
+        edit_file("sample.py", "return a + b", "return a - b")
+        write_file("новый.py", "print('агент')\n")
+
+        # Тот самый случай, ради которого всё затевалось: процесс
+        # умер, список в памяти потерян, журнал на диске жив.
+        guard._CHANGES.clear()
+        assert guard.change_count() == 0
+        assert history.pending(repo) == ["sample.py", "новый.py"]
+
+        done = guard.rollback()
+        assert "return a + b" in (repo / "sample.py").read_text(encoding="utf-8")
+        assert not (repo / "новый.py").exists()
+        assert any("восстановлен sample.py" in line for line in done)
+        assert any("удалён новый.py" in line for line in done)
+
+    def test_откат_не_трогает_файл_человека(self, repo):
+        (repo / "чужое.txt").write_text("моё\n", encoding="utf-8")
+        edit_file("sample.py", "return a + b", "return a - b")
+        (repo / "чужое.txt").write_text("моё, правленное\n", encoding="utf-8")
+
+        guard.rollback()
+
+        # Файл, которого агент не касался, откат не восстанавливает:
+        # журнал ведётся по правкам агента, а не по состоянию каталога.
+        assert (repo / "чужое.txt").read_text(encoding="utf-8") == "моё, правленное\n"
+
+    def test_снимок_не_двигает_HEAD(self, repo):
+        before = self.git(repo, "rev-parse", "--abbrev-ref", "HEAD").strip()
+        edit_file("sample.py", "return a + b", "return a - b")
+        assert self.git(repo, "rev-parse", "--abbrev-ref", "HEAD").strip() == before == "main"
+
+    def test_снимок_не_трогает_индекс_человека(self, repo):
+        # Человек добавил файл к следующему коммиту и пошёл пить чай.
+        # Имя латиницей не от лени: git по умолчанию экранирует
+        # не-ASCII в выводе, и проверка сравнивала бы не то.
+        (repo / "staged.txt").write_text("к коммиту\n", encoding="utf-8")
+        self.git(repo, "add", "staged.txt")
+
+        edit_file("sample.py", "return a + b", "return a - b")
+
+        # Снимок собирается во ВРЕМЕННОМ индексе, поэтому подготовленный
+        # человеком файл остаётся подготовленным.
+        assert "staged.txt" in self.git(repo, "diff", "--cached", "--name-only")
+
+    def test_повторная_правка_возвращает_к_самому_раннему(self, repo):
+        edit_file("sample.py", "return a + b", "return a - b")
+        edit_file("sample.py", "return a - b", "return a * b")
+        assert history.pending(repo) == ["sample.py"]
+
+        guard._CHANGES.clear()
+        guard.rollback()
+        assert "return a + b" in (repo / "sample.py").read_text(encoding="utf-8")
+
+    def test_откат_оставляет_ветку_человеку(self, repo):
+        edit_file("sample.py", "return a + b", "return a - b")
+        name = history.branch(repo)
+        guard.rollback()
+
+        assert history.pending(repo) == []
+        assert name in self.git(repo, "branch", "--list", name)
+
+    def test_новый_прогон_журнал_обнуляет_а_ветку_нет(self, repo):
+        edit_file("sample.py", "return a + b", "return a - b")
+        name = history.branch(repo)
+
+        guard.forget_changes()
+
+        assert history.pending(repo) == []
+        assert name in self.git(repo, "branch", "--list", name)
+
+    def test_журнал_другого_каталога_не_применяется(self, repo, tmp_path):
+        edit_file("sample.py", "return a + b", "return a - b")
+        assert history.pending(repo)
+        # Тот же журнал, но спрашивают про чужой каталог.
+        assert history.pending(tmp_path / "другой") == []
+        assert history.branch(tmp_path / "другой") == ""
+
+    def test_вне_репозитория_остаётся_список_в_памяти(self, sample):
+        edit_file("sample.py", "return a + b", "return a - b")
+        assert history.pending(guard.get_workspace()) == []
+        assert guard.change_count() == 1
+        guard.rollback()
+        assert "return a + b" in sample.read_text(encoding="utf-8")
 
 
 # ====================================================================
