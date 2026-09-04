@@ -609,7 +609,10 @@ def handle(command: str, session: Session) -> str | None:
         return session.memory.report()
     if lowered in ("забудь сессию", "забудь память"):
         session.memory.forget_all()
-        return "🧹 Память сессии очищена: каталог, файл и задача забыты."
+        return (
+            "🧹 Память сессии очищена: каталог, а также файл и задача "
+            "ЭТОГО проекта. Память других проектов не тронута."
+        )
     if lowered in ("забудь", "reset", "сброс"):
         session.forget()
         return "🧹 История разговора очищена (файлы и индексы не тронуты)."

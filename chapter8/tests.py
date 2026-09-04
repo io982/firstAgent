@@ -30,12 +30,14 @@ import chapter1.agent as base
 import chapter7.agent as chapter7_agent
 import chapter8.agent as agent8
 from chapter1.agent import request_model
+from chapter3.src.memory import LongTermMemory
 from chapter7.src.agents import SPECIALISTS, Team
 from chapter7.src.graph import State
 from chapter7.src.models import using_model
 from chapter8.agent import handle
 from chapter8.src import codemap, env, guard, history, pipeline, pipeline_lg, review, shell
 from chapter8.src import planner as planner_module
+from chapter8.src import session as session_module
 from chapter8.src.edits import (
     ANCHOR,
     APPEND,
@@ -92,7 +94,7 @@ from chapter8.src.planner import (
     split_target,
     validate_plan,
 )
-from chapter8.src.session import KEYS, SessionMemory
+from chapter8.src.session import CURRENT_FILE, KEYS, LAST_TASK, WORKSPACE, SessionMemory
 from chapter8.src.shell import (
     RUN_TOOLS,
     Run,
@@ -4769,6 +4771,94 @@ class TestSessionMemory:
         report = memory.report()
         assert "calc.py" in report
         assert "Последняя задача" not in report
+
+    # ---- у каждого проекта своя память -------------------------------
+
+    def test_второй_проект_не_затирает_первый(self, memory, tmp_path):
+        """Тот самый случай, ради которого ключи разъехались по каталогам.
+
+        Человек поработал в одном проекте, переключился на другой,
+        вернулся — и застал там файл и задачу из чужого проекта.
+        """
+        first, second = tmp_path / "первый", tmp_path / "второй"
+        for folder in (first, second):
+            folder.mkdir()
+
+        guard.set_workspace(first)
+        memory.note_work("почини сложение", ["calc.py"])
+
+        guard.set_workspace(second)
+        memory.note_work("добавь маршрут", ["server.py"])
+        assert memory.get(CURRENT_FILE) == "server.py"
+
+        guard.set_workspace(first)
+        assert memory.get(CURRENT_FILE) == "calc.py"
+        assert memory.get(LAST_TASK) == "почини сложение"
+
+    def test_каталог_остаётся_общим(self, memory, tmp_path):
+        """Рабочий каталог — один на агента, и делить его по каталогам незачем."""
+        first, second = tmp_path / "первый", tmp_path / "второй"
+        for folder in (first, second):
+            folder.mkdir()
+
+        guard.set_workspace(first)
+        memory.note_workspace()
+        guard.set_workspace(second)
+        memory.note_workspace()
+
+        guard.set_workspace(first)
+        assert Path(memory.get(WORKSPACE)) == second, "помнится тот, где были в последний раз"
+
+    def test_похожие_имена_каталогов_не_сливаются(self, memory, tmp_path):
+        """Ключи памяти Главы 3 нормализуются: дефис и подчёркивание в них одно.
+
+        Поэтому в ключ идёт не путь, а его отпечаток: иначе `my-app`
+        и `my_app` стали бы одним проектом с одной памятью на двоих.
+        """
+        dashed, scored = tmp_path / "my-app", tmp_path / "my_app"
+        for folder in (dashed, scored):
+            folder.mkdir()
+
+        guard.set_workspace(dashed)
+        memory.note_work("задача с дефисом", ["a.py"])
+        guard.set_workspace(scored)
+        memory.note_work("задача с подчёркиванием", ["b.py"])
+
+        guard.set_workspace(dashed)
+        assert memory.get(CURRENT_FILE) == "a.py"
+
+    def test_забыть_сессию_не_трогает_другой_проект(self, memory, tmp_path):
+        first, second = tmp_path / "первый", tmp_path / "второй"
+        for folder in (first, second):
+            folder.mkdir()
+
+        guard.set_workspace(first)
+        memory.note_work("задача первого", ["a.py"])
+        guard.set_workspace(second)
+        memory.note_work("задача второго", ["b.py"])
+
+        memory.forget_all()
+
+        assert memory.get(CURRENT_FILE) == ""
+        guard.set_workspace(first)
+        assert memory.get(CURRENT_FILE) == "a.py", "чужую память забывать не просили"
+
+    def test_ключи_старого_формата_убираются(self, tmp_path):
+        """Перенести их некуда: к какому проекту они относились, не записано."""
+        path = tmp_path / "session.json"
+        old = LongTermMemory(path)
+        old.remember(CURRENT_FILE, "неизвестно_чей.py")
+
+        memory = SessionMemory(path)
+
+        assert memory.get(CURRENT_FILE) == ""
+        assert CURRENT_FILE not in path.read_text(encoding="utf-8")
+
+    def test_имя_каталога_видно_в_ключе(self, tmp_path):
+        """`session.json` открывают глазами, и один голый хэш там бесполезен."""
+        folder = tmp_path / "мойпроект"
+        folder.mkdir()
+        assert session_module.scope(folder).startswith("мойпроект_")
 
 
 class TestAgentEntry:
