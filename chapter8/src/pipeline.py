@@ -222,6 +222,62 @@ SCRIPTED_INPUTS = (
 INPUT_RAN_OUT = "EOFError"
 
 
+# Как модель присылает ФАЙЛ ЦЕЛИКОМ: "schema" — полем JSON, "text" —
+# обычным текстом, из которого мы снимаем ```-обёртку.
+#
+# Вопрос не праздный, и он бьёт по главному приёму главы. Схема
+# выигрывала четыре раза подряд — на форме правки, имени файла, выборе
+# места и составе файла, — но все те ответы КОРОТКИЕ: одно поле, одно
+# имя, один список. Файл целиком — это сотни строк, и схема заставляет
+# экранировать каждую кавычку и каждый перевод строки.
+#
+# Живой прогон показал, чем это кончается. На задаче со строкой
+# «f'(x) = 4x + 5» qwen2.5-coder:3b сломала не код, а САМ JSON:
+# `json.loads` упал с «Unterminated string». Уровней кавычек три —
+# JSON, исходник, литерал внутри исходника, — и 3B теряет один.
+# Тот же промпт без апострофа: 2 файла из 3 вместо 0.
+#
+# Текстовый способ убирает один уровень: модель пишет код как код,
+# а `_strip_fences` снимает обёртку, если она есть.
+#
+# Замер 11 (TestWriteTransport), три задачи с кавычками внутри литерала
+# и три обычные, по два прогона. Считается доля ответов, из которых
+# вышел РАЗБИРАЮЩИЙСЯ файл:
+#
+#     модель                    способ    с кавычками   обычные
+#     qwen2.5:3b                schema            5/6       6/6
+#     qwen2.5:3b                text              6/6       6/6
+#     qwen2_5coder3b_q5         schema            2/6       6/6
+#     qwen2_5coder3b_q5         text              6/6       6/6
+#     qwen2.5-coder:3b          schema            2/6       6/6
+#     qwen2.5-coder:3b          text              6/6       6/6
+#     qwen2.5-coder:7b          schema            4/6       6/6
+#     qwen2.5-coder:7b          text              6/6       6/6
+#     llama3.1:8b               schema            3/6       4/6
+#     llama3.1:8b               text              6/6       4/6
+#
+# Текст выигрывает у ВСЕХ пяти моделей и не проигрывает нигде: 30 из 30
+# против 16 из 30. На обычных задачах разница нулевая — способ доставки
+# не портит простое. И он же быстрее: 17 секунд против 28 у coder:3b,
+# потому что экранирование — это лишние токены.
+#
+# Вывод уточняет главный приём главы, а не отменяет его. **Схема
+# помогает, пока ответ КОРОТКИЙ, и мешает, когда он длинный.** Форма
+# правки, имя файла, выбор места, состав файла — это одно поле или
+# одно имя, и там схема выиграла четырежды. Файл целиком — сотни
+# строк, и каждая кавычка в нём требует экранирования: уровней
+# получается три (JSON, исходник, литерал внутри исходника), и модель
+# на 3B теряет один. Ломается при этом не код, а сам конверт:
+# `json.loads` падает с «Unterminated string» ещё до того, как мы
+# успеваем посмотреть на Python.
+WRITE_TRANSPORT = os.environ.get("AGENT_WRITE_TRANSPORT", "text")
+
+TEXT_RULES = """
+
+Ответ — ТОЛЬКО код файла, без пояснений до и после.
+Можно обернуть его в ```python и ```, больше ничего не добавляй."""
+
+
 # Сколько раз просить модель написать файл. Два, и это не запас
 # прочности: файл, который не записался, потерян насовсем — цикл
 # починки правит существующие файлы и создать недостающий не умеет.
@@ -764,19 +820,28 @@ def _write_once(step, state: State, path: str, problem: str, attempt: int) -> tu
     return True, result
 
 
-def _ask_file(system: str, user: str, schema: dict) -> tuple[dict | str, str]:
+def _ask_file(system: str, user: str, schema: dict, as_text: bool = False) -> tuple[dict | str, str]:
     """Один запрос к модели, пишущей код. Возвращает ответ и текст беды.
 
     Своё время ожидания и предел длины. Написать файл целиком —
     генерация на сотни токенов, и общего предела Главы 1 на неё
     не хватает; а без предела длины генерация иногда уходит в разгон
     и всё равно упирается в таймаут.
+
+    `as_text` меняет способ доставки: код приходит обычным текстом,
+    а не полем JSON. Это на один уровень экранирования меньше, и на
+    длинных ответах разница может решать — см. WRITE_TRANSPORT.
+    Ответ всё равно возвращается словарём, чтобы вызывающий не знал,
+    каким способом файл приехал.
     """
+    if as_text:
+        system += TEXT_RULES
     messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
     try:
         with using_model(coder_model()), _patience(WRITE_TIMEOUT):
-            raw = request_model(messages, response_format=schema, options={"num_predict": WRITE_MAX_TOKENS})
-        answer = json.loads(raw)
+            raw = request_model(messages, response_format=None if as_text else schema,
+                                options={"num_predict": WRITE_MAX_TOKENS})
+        answer = _as_answer(raw) if as_text else json.loads(raw)
     except Exception as exc:  # noqa: BLE001
         return {}, str(exc)
     # Схема требует объект, но проверка стоит всё равно: разбор JSON
@@ -785,6 +850,25 @@ def _ask_file(system: str, user: str, schema: dict) -> tuple[dict | str, str]:
     if not isinstance(answer, dict):
         return {}, f"ответ не объект, а {type(answer).__name__}"
     return answer, ""
+
+
+def _as_answer(raw: str) -> dict:
+    """Ответ текстом — но конверт принимаем тоже.
+
+    Модель, которую попросили прислать голый код, иногда всё равно
+    отвечает объектом с полем `content`: JSON встречается в её
+    обучающих данных не реже, чем код. Принять оба вида дешевле,
+    чем спорить промптом, — тот же приём, что `_strip_fences`
+    для тройных кавычек.
+    """
+    if raw.lstrip().startswith("{"):
+        try:
+            envelope = json.loads(raw)
+        except ValueError:
+            return {"content": raw}
+        if isinstance(envelope, dict) and "content" in envelope:
+            return envelope
+    return {"content": raw}
 
 
 def _task_block(step, state: State, path: str, problem: str) -> str:
@@ -815,7 +899,8 @@ def _content_directly(step, state: State, path: str, problem: str, attempt: int)
         f"{_neighbours(state)}{_task_block(step, state, path, problem)}\n"
         f"Верни содержимое файла {path} целиком. Не соседнего, не части — этого и всего."
     )
-    answer, trouble = _ask_file(CREATE_RULES, user, file_schema())
+    answer, trouble = _ask_file(CREATE_RULES, user, file_schema(),
+                                as_text=WRITE_TRANSPORT == "text")
     if trouble:
         return "", f"модель не написала файл (попытка {attempt}): {trouble}"
 
@@ -1177,7 +1262,8 @@ def _edit_function(state: State, place: dict, detail: str, problem: str = "") ->
         user += f"\nПодсказка из плана: {detail}\n"
     user += f"\nЗАДАЧА ЦЕЛИКОМ — делай ровно её, ничего не упуская:\n{state.user_input}\n"
 
-    answer, trouble = _ask_file(FUNCTION_RULES, user, file_schema())
+    answer, trouble = _ask_file(FUNCTION_RULES, user, file_schema(),
+                                as_text=WRITE_TRANSPORT == "text")
     if trouble:
         return False, f"модель не переписала функцию: {trouble}"
 

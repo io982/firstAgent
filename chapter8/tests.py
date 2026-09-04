@@ -2154,6 +2154,63 @@ class TestSkeleton:
         assert "content" not in props and "code" not in props
 
 
+class TestWriteTransportChoice:
+    """Как модель присылает файл: полем JSON или обычным текстом.
+
+    Замер 11 показал, что схема на длинном ответе мешает: уровней
+    кавычек три — JSON, исходник, литерал внутри исходника, — и модель
+    на 3B теряет один. Ломается при этом сам конверт: `json.loads`
+    падает с «Unterminated string» ещё до того, как мы посмотрим
+    на Python.
+    """
+
+    def test_по_умолчанию_текстом(self):
+        """Решение замера 11: текст выиграл у всех пяти моделей."""
+        assert pipeline.WRITE_TRANSPORT == "text"
+
+    def test_текстом_схема_не_навязывается(self, workspace, monkeypatch):
+        seen = []
+
+        def model(messages, response_format=None, options=None):
+            seen.append(response_format)
+            return "x = 1" + chr(10)
+
+        monkeypatch.setattr(pipeline, "request_model", model)
+        state = started(Plan("з", [Step("create", "app.py", "")]))
+        pipeline.node_step(state)
+
+        assert seen == [None], "грамматика не навязывается — ответ обычный текст"
+        assert (workspace / "app.py").read_text(encoding="utf-8") == "x = 1" + chr(10)
+
+    def test_конверт_тоже_принимается(self, workspace, monkeypatch):
+        """Модель, которую просили голый код, иногда отвечает объектом."""
+        monkeypatch.setattr(pipeline, "request_model",
+                            lambda *a, **k: file_answer("y = 2" + chr(10)))
+        state = started(Plan("з", [Step("create", "app.py", "")]))
+        pipeline.node_step(state)
+        assert (workspace / "app.py").read_text(encoding="utf-8") == "y = 2" + chr(10)
+
+    def test_обёртка_из_кавычек_снимается(self, workspace, monkeypatch):
+        monkeypatch.setattr(pipeline, "request_model",
+                            lambda *a, **k: "```python" + chr(10) + "z = 3" + chr(10) + "```")
+        state = started(Plan("з", [Step("create", "app.py", "")]))
+        pipeline.node_step(state)
+        assert (workspace / "app.py").read_text(encoding="utf-8") == "z = 3" + chr(10)
+
+    def test_схемой_по_переключателю(self, workspace, monkeypatch):
+        seen = []
+
+        def model(messages, response_format=None, options=None):
+            seen.append(response_format)
+            return file_answer("x = 1" + chr(10))
+
+        monkeypatch.setattr(pipeline, "WRITE_TRANSPORT", "schema")
+        monkeypatch.setattr(pipeline, "request_model", model)
+        state = started(Plan("з", [Step("create", "app.py", "")]))
+        pipeline.node_step(state)
+        assert seen[0] is not None, "схема на месте, когда её просят"
+
+
 class TestWriteModes:
     """Два способа написать файл: один запрос или скелет плюс дописывание."""
 
@@ -5620,6 +5677,91 @@ class TestReviewQuality:
         print(f"{'модель':<26}{'поймал беду':>14}{'промолчал зря нет':>20}{'секунд':>10}")
         for model, caught, quiet, spent in report:
             print(f"{model:<26}{caught:>11}/{bad_total:<2}{quiet:>17}/{good_total:<2}{spent:>10.1f}")
+
+        assert report, "замер не собрал ни одной строки"
+
+
+# Задачи, где ответ обязан содержать КАВЫЧКИ внутри строкового литерала.
+# Именно на них живой прогон и сломался: уровней кавычек три — JSON,
+# исходник, литерал внутри исходника, — и 3B теряет один.
+QUOTING_TASKS = [
+    ("апостроф", "напиши приложение, которое решает квадратное уравнение и печатает "
+                 "формулу производной, например для \"2x^2 + 5x + 2 = 0\" строку \"f'(x) = 4x + 5\""),
+    ("кавычки", "напиши приложение, которое спрашивает имя и печатает "
+                "Привет, \"имя\"! Добро пожаловать"),
+    ("апостроф в тексте", "напиши приложение, которое печатает строку It's done "
+                          "и ждёт нажатия клавиши"),
+]
+
+
+@pytest.mark.slow
+class TestWriteTransport:
+    """Замер 11: файл полем JSON против файла обычным текстом.
+
+    Замер бьёт по главному приёму главы, и в этом его смысл. Схема
+    выигрывала четыре раза подряд — форма правки, имя файла, выбор
+    места, состав файла, — но ВСЕ те ответы короткие: одно поле, одно
+    имя, один список. Файл целиком — сотни строк, и схема заставляет
+    экранировать каждую кавычку и каждый перевод строки.
+
+    Живой прогон показал, чем это кончается. На задаче со строкой
+    «f'(x) = 4x + 5» qwen2.5-coder:3b сломала не код, а САМ JSON:
+    `json.loads` упал с «Unterminated string». Три прогона из трёх.
+    Тот же промпт без апострофа — два файла из трёх вместо нуля.
+
+    Мерится доля ответов, из которых вышел РАЗБИРАЮЩИЙСЯ файл. Не
+    «зелёная проверка»: качество кода тут ни при чём, вопрос ровно
+    в том, доезжает ли текст целым. Задачи подобраны так, чтобы ответ
+    обязан был содержать кавычки внутри литерала, и рядом — обычные
+    задачи главы как мера того, что способ доставки не портит простое.
+    """
+
+    ROUNDS = 2
+
+    def test_как_доставлять_файл(self, tmp_path, warm_model):
+        installed = set(base.list_installed_models())
+        models = [m for m in CODER_CANDIDATES if m in installed]
+        if not models:
+            pytest.skip(f"ни одна из моделей {CODER_CANDIDATES} не установлена")
+
+        simple = [(name, task) for name, task in SCRATCH_TASKS[:3]]
+        report = []
+        for model in models:
+            for transport in ("schema", "text"):
+                tricky_ok = simple_ok = 0
+                broken_json = 0
+                spent = 0.0
+                with using_model(model), pytest.MonkeyPatch.context() as patch:
+                    patch.setattr(pipeline, "WRITE_TRANSPORT", transport)
+                    for kind, tasks, counter in (("сложные", QUOTING_TASKS, "tricky"),
+                                                 ("простые", simple, "simple")):
+                        for _, (name, task) in rounds(self.ROUNDS, tasks):
+                            make_empty_project(tmp_path / f"{folder_name(model)}-{transport}-{name}")
+                            state = started(Plan(task, [Step("create", "app.py", task)]))
+                            started_at = time.monotonic()
+                            content, trouble = pipeline._content_directly(
+                                Step("create", "app.py", task), state, "app.py", "", 1)
+                            spent += time.monotonic() - started_at
+                            if trouble:
+                                broken_json += "nterminated" in trouble or "JSON" in trouble
+                                continue
+                            if syntax_ok("app.py", content)[0]:
+                                if counter == "tricky":
+                                    tricky_ok += 1
+                                else:
+                                    simple_ok += 1
+                report.append((model, transport, tricky_ok, simple_ok, broken_json, spent))
+
+        tricky_total = len(QUOTING_TASKS) * self.ROUNDS
+        simple_total = len(simple) * self.ROUNDS
+        print("\n\nЗАМЕР 11: как доставлять файл — полем JSON или текстом")
+        print(f"Задач с кавычками: {len(QUOTING_TASKS)}, обычных: {len(simple)}, "
+              f"прогонов каждой: {self.ROUNDS}")
+        print(f"{'модель':<26}{'способ':<9}{'с кавычками':>13}{'обычные':>10}"
+              f"{'сломан JSON':>13}{'секунд':>9}")
+        for model, transport, tricky, plain, broken, spent in report:
+            print(f"{model:<26}{transport:<9}{tricky:>10}/{tricky_total:<2}"
+                  f"{plain:>7}/{simple_total:<2}{broken:>13}{spent:>9.0f}")
 
         assert report, "замер не собрал ни одной строки"
 
