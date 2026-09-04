@@ -67,7 +67,7 @@ from chapter1.agent import request_model
 from chapter5.agent import matches
 from chapter7.src.graph import END, Graph, State
 from chapter7.src.models import using_model
-from chapter8.src import codemap, env, formula, guard, review
+from chapter8.src import codemap, env, guard, review
 from chapter8.src.edits import (
     ANCHOR,
     ANCHOR_MISSED,
@@ -648,18 +648,6 @@ def _step_search(step, state: State) -> tuple[bool, str]:
         _remember_place(state, codemap.choose(state.user_input, path))
         return True, f"файл {path}"
 
-    # Цель шага — само имя функции? Тогда спрашивать модель не о чем:
-    # адрес уже назван, и карта его подтверждает. Живой прогон показал,
-    # чем оборачивается лишний вопрос: на задаче «нужно чтобы derivative
-    # вызывалась ВНУТРИ solve_quadratic» код выбрал `solve_quadratic`
-    # (самое длинное слово задачи), а модель — `derivative`, потому что
-    # это имя стоит в задаче первым. Править надо было первое.
-    named_place = codemap.find(target)
-    if named_place:
-        state.extra["path"] = named_place.path
-        _remember_place(state, named_place)
-        return True, f"функция {named_place.name} в {named_place.path}"
-
     found = search_files(target, "*.py")
     path = _first_path(found)
     if path:
@@ -815,14 +803,6 @@ def _task_block(step, state: State, path: str, problem: str) -> str:
     # тратить контекст на повтор.
     if hint and hint != state.user_input.strip():
         text += f"Подсказка из плана (не ограничение, а напоминание): {hint}\n"
-    # Формулы спрашиваются отдельным коротким вопросом и приходят сюда
-    # уже проверенными вычислением. Причина в наблюдении: модель,
-    # которую просят «добавь вывод производной», пишет в коде
-    # `2*a*b - 4*a*c`, а спрошенная коротко отвечает `2*a*x + b` —
-    # и так шесть раз из шести на двух моделях. Знание есть, оно
-    # не всплывает под длинной задачей. Тот же урок, что у формы правки,
-    # имени файла и выбора места: короткий вопрос получает хороший ответ.
-    text += _formula_hints(state)
     text += f"\nЗАДАЧА ЦЕЛИКОМ — делай ровно её, ничего не упуская:\n{state.user_input}\n"
     if problem:
         text += f"\nПрошлая попытка не годится: {problem}\n"
@@ -960,22 +940,6 @@ def _patience(seconds: float):
         yield
     finally:
         base.REQUEST_TIMEOUT = previous
-
-
-def _formula_hints(state: State) -> str:
-    """Справка с формулами — один раз на прогон, а не на каждый запрос.
-
-    Кэш в состоянии обязателен: `_task_block` зовут и создание файла,
-    и правка, и каждая попытка починки, а вопрос к модели стоит секунд.
-    Задача за прогон не меняется, значит и формулы те же.
-    """
-    if "formulas" not in state.extra:
-        # Предметом вопроса служит код, который правим: без него
-        # «производная» — вопрос без ответа.
-        place = state.extra.get("place") or {}
-        source = _function_source(place["path"], place) if place.get("path") else ""
-        state.extra["formulas"] = formula.hints(state.user_input, source)
-    return state.extra["formulas"]
 
 
 def _neighbours(state: State) -> str:
@@ -1469,14 +1433,10 @@ def node_verify(state: State) -> State:
         limit = max(guard.get_policy().timeout, 60.0)
         if _waits_for_input(entry) and not wants_scaffold(state.user_input):
             # Программу, ждущую ввода, ЗАПУСКАЕМ с подставленными
-            # строками. Раньше таких программ было два вида — с вводом
-            # под `if __name__` и с вводом на верхнем уровне модуля, —
-            # и проверялись они по-разному: первая импортом, вторая
-            # разбором. Оба ответа молчали про то, ради чего программу
-            # пишут: файл разбирается, импортируется — а запуск падает
-            # NameError или TypeError на первой же строке. Запуск
-            # с вводом сделал это различие ненужным: он одинаково
-            # выполняет оба вида и одинаково ловит обе беды.
+            # строками. Раньше её проверяли импортом или разбором,
+            # и оба молчали про то, ради чего программу пишут: файл
+            # разбирается, импортируется — а запуск падает NameError
+            # или TypeError на первой же строке.
             #
             # Ввод кончился (EOFError) — это НАША беда, а не программы:
             # мы дали меньше строк, чем она спросила. Такой ответ
@@ -1501,6 +1461,19 @@ def node_verify(state: State) -> State:
             # на единственный вопрос, который к каркасу имеет смысл.
             run = execute([interpreter(), "-m", "py_compile", entry], timeout=limit)
             state.extra["verified_by"] = f"разбор {entry} (просили каркас, выполнять в нём нечего)"
+        elif asks_input_on_import(entry):
+            # Ввод стоит на верхнем уровне модуля: импорт его ВЫПОЛНИТ
+            # и упадёт тем же EOFError, от которого импорт и должен был
+            # спасти. Живой прогон на этом откатил правильно написанное
+            # приложение. Остаётся разбор — он ничего не выполняет.
+            run = execute([interpreter(), "-m", "py_compile", entry], timeout=limit)
+            state.extra["verified_by"] = (
+                f"разбор {entry} (ввод спрашивается сразу при импорте, выполнять нечем)"
+            )
+        elif _waits_for_input(entry):
+            module = entry.rsplit("/", 1)[-1][: -len(".py")]
+            run = execute([interpreter(), "-c", f"import {module}"], timeout=limit)
+            state.extra["verified_by"] = f"импорт {entry} (программа ждёт ввода, запускать её нечем)"
         else:
             # Запуск здесь идёт БЕЗ guard.check, и это правило, а не
             # недосмотр. Спрашивать нечего: человек подтвердил план,
@@ -1579,6 +1552,14 @@ def _asks_input(node: ast.AST) -> bool:
     return False
 
 
+def _main_guard(node: ast.AST) -> bool:
+    """Это блок `if __name__ == "__main__":`?"""
+    if not isinstance(node, ast.If) or not isinstance(node.test, ast.Compare):
+        return False
+    left = node.test.left
+    return isinstance(left, ast.Name) and left.id == "__name__"
+
+
 def _module_tree(path: str) -> ast.Module | None:
     """Разбор файла или None, если он не читается и не разбирается."""
     try:
@@ -1591,6 +1572,35 @@ def _waits_for_input(path: str) -> bool:
     """Читает ли программа ввод с клавиатуры — где угодно в файле."""
     tree = _module_tree(path)
     return tree is not None and _asks_input(tree)
+
+
+def asks_input_on_import(path: str) -> bool:
+    """Спросит ли файл ввод ПРИ ИМПОРТЕ, а не только при запуске.
+
+    Разница стоила отката правильно написанного приложения, и вот она.
+    Проверка «программа ждёт ввода — значит импортируем» опирается
+    на молчаливое допущение, что интерактив лежит под `if __name__ ==
+    "__main__":`. Модель на 3B это допущение не разделяет: живой прогон
+    дал файл, где `input()` стоит прямо на верхнем уровне модуля.
+    Импорт такой модуль ВЫПОЛНЯЕТ — и падает тем же `EOFError`,
+    от которого импорт и должен был спасти.
+
+    Поэтому смотрим не «есть ли input», а «выполнится ли он при
+    импорте»: тела функций и классов при импорте не исполняются,
+    блок `__main__` при импорте не исполняется тоже, всё остальное —
+    исполняется.
+    """
+    tree = _module_tree(path)
+    if tree is None:
+        return False
+    for statement in tree.body:
+        if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            continue
+        if _main_guard(statement):
+            continue
+        if _asks_input(statement):
+            return True
+    return False
 
 
 def _run_with_inputs(entry: str, limit: float) -> Run:
@@ -1778,11 +1788,6 @@ def _ask_for_edit(state: State, path: str, detail: str, failure: str = "",
     user = f"Задача: {state.user_input}\n"
     if detail:
         user += f"Шаг плана: {detail}\n"
-    # Справка о формулах нужна и здесь, а не только на пути правки
-    # одной функции. Первая версия клала её только в `_task_block`,
-    # который обычные формы правки не зовут вовсе, — и вся работа
-    # со спрошенной формулой до модели не доезжала.
-    user += _formula_hints(state)
     # `retrieved` уже приходит с заголовками файлов, когда его собрал
     # `_read_pair`. Заворачивать его во второй заголовок значит написать
     # «Файл a.py: Файл a.py: ...» и запутать модель ровно там, где ей

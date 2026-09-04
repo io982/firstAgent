@@ -240,6 +240,14 @@ def find(name: str) -> Definition | None:
     return None
 
 
+def render(limit: int = MAP_LIMIT) -> str:
+    """Карта строками — то, что уезжает в промпт выбора места."""
+    items = scan()[:limit]
+    if not items:
+        return "В проекте нет ни одной функции."
+    return "\n".join(item.line() for item in items)
+
+
 def names(limit: int = MAP_LIMIT) -> list[str]:
     """Имена определений — для `enum` в схеме ответа.
 

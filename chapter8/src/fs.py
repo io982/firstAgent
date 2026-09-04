@@ -35,15 +35,11 @@ from chapter8.src.edits import (
     apply_append,
     apply_full,
     apply_lines,
-    doubled_main,
-    duplicate_definitions,
     lost_definitions,
     stray_definitions,
     syntax_ok,
     unified,
-    unreachable_code,
 )
-from chapter8.src.shell import undefined_in_text
 
 # Потолки вывода. В символах и штуках, а не в токенах: считать токены
 # на каждый чих дорого, а связь между ними линейная — потолок в символах
@@ -137,54 +133,6 @@ def _commit(path: Path, before: str, after: str, action: str, replace: bool = Fa
         )
     if lost:
         warning = f"\n⚠️ Из файла пропадут определения: {', '.join(lost)}\n"
-
-    if doubled_main(path.name, before, after) and not replace:
-        return (
-            "Правка отменена: в файле появился второй блок "
-            "`if __name__ == \"__main__\"`. Он бывает ровно один — иначе "
-            "программа спросит у человека одно и то же дважды. "
-            "Файл на диске не тронут."
-        )
-
-    # Неопределённое имя ловится ПРИ ЗАПИСИ, а не после прогона.
-    # Живой прогон: правка вписала `print(2*a*x + b)` в функцию
-    # `solve_quadratic(a, b, c)`, где никакого `x` нет. Поймалось это
-    # запуском в конце плана — то есть после двух кругов починки
-    # и отката всей работы, — а линтер знал об этом сразу.
-    #
-    # Считаются только НОВЫЕ имена: файл мог приехать к нам уже
-    # с неопределённым именем, и отменять из-за этого правку значит
-    # запретить чинить как раз то, что сломано.
-    # Линтер спрашивается о НОВОМ тексте, и только если он что-то нашёл —
-    # о старом. Порядок не для красоты: чистых правок подавляющее
-    # большинство, а каждый вызов линтера это отдельный процесс.
-    found = undefined_in_text(path.name, after) if not replace else []
-    was_undefined = set(undefined_in_text(path.name, before)) if found else set()
-    now_undefined = [name for name in found if name not in was_undefined]
-    if now_undefined:
-        return (
-            f"Правка отменена: имена {', '.join(now_undefined)} нигде не определены — "
-            "программа упадёт NameError на первой же строке, где они встретятся. "
-            "Пользуйтесь тем, что функции доступно: её аргументами и именами файла. "
-            "Файл на диске не тронут."
-        )
-
-    twice = duplicate_definitions(path.name, before, after)
-    if twice and not replace:
-        return (
-            f"Правка отменена: определения {', '.join(twice)} после неё оказались в файле "
-            "дважды. Менять надо СУЩЕСТВУЮЩЕЕ определение, а не дописывать рядом второе. "
-            "Файл на диске не тронут."
-        )
-
-    dead = unreachable_code(path.name, before, after)
-    if dead and not replace:
-        where = "; ".join(dead[:3])
-        return (
-            f"Правка отменена: после неё код «{where}» стоит за return или raise — "
-            "до него выполнение не дойдёт никогда. Поставьте его ПЕРЕД выходом "
-            "из функции. Файл на диске не тронут."
-        )
 
     diff = unified(before, after, guard.relative(path))
     verdict = guard.check(action, warning + (diff or "изменений в тексте нет"))
