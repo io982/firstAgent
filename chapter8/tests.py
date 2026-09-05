@@ -6797,15 +6797,15 @@ def disk_size(names):
 
 @pytest.mark.slow
 @needs_langgraph
-class TestLangGraphCost:
-    """Замер 4: во что обходится готовый сборщик графов.
+class TestLangGraphWeight:
+    """Замер 4: что тянет за собой готовый сборщик графов.
 
     Здесь нет модели и нет случайности, поэтому замер быстрый — но
     метка `slow` стоит по другой причине: он лезет в метаданные
     установленных пакетов и на чужой машине даст другие числа.
 
     Считается не «сколько пакетов у langgraph», а сколько их СВЕРХ
-    того, что курс ставит и так. Общее число было бы нечестным
+    того, что курс ставит и так. Общее число вводило бы в заблуждение
     в обе стороны: pydantic и requests в нём уже есть, а вот
     langsmith со своим http-клиентом — нет.
     """
@@ -6814,7 +6814,7 @@ class TestLangGraphCost:
     # requirements.txt, кроме самой langgraph: она и есть предмет замера.
     COURSE_ROOTS = ("requests", "pytest", "pytest-timeout", "chromadb", "snowballstemmer")
 
-    def test_цена_зависимости(self):
+    def test_вес_зависимости(self):
         added = dependency_closure(["langgraph"]) - dependency_closure(self.COURSE_ROOTS)
         if not added:
             pytest.skip("langgraph не установлена — считать нечего")
@@ -6822,7 +6822,7 @@ class TestLangGraphCost:
         own = len(Path("chapter7/src/graph.py").read_text(encoding="utf-8").splitlines())
         adapter = len(Path("chapter8/src/pipeline_lg.py").read_text(encoding="utf-8").splitlines())
 
-        print("\n\nЗАМЕР 4: цена LangGraph")
+        print("\n\nЗАМЕР 4: вес LangGraph")
         print(f"Пакетов сверх тех, что курс ставит и так: {len(added)}")
         print(f"   {', '.join(sorted(added))}")
         print(f"На диске: {disk_size(added) / 1024 / 1024:.1f} МБ")
