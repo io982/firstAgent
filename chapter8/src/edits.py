@@ -538,6 +538,85 @@ def drop_repeated_imports(before: str, after: str) -> tuple[str, list[str]]:
     return "".join(out), dropped
 
 
+def _is_main_guard(node: ast.AST) -> bool:
+    """Тот самый `if __name__ == "__main__":`."""
+    if not isinstance(node, ast.If):
+        return False
+    test = node.test
+    return (
+        isinstance(test, ast.Compare)
+        and isinstance(test.left, ast.Name)
+        and test.left.id == "__name__"
+        and len(test.comparators) == 1
+        and isinstance(test.comparators[0], ast.Constant)
+        and test.comparators[0].value == "__main__"
+    )
+
+
+def trim_known_blocks(file_text: str, content: str) -> tuple[str, list[str]]:
+    """Убирает из ответа модели то, что в файле УЖЕ есть.
+
+    Промпт правки функции говорит прямым текстом: «в поле content —
+    только эта функция, ни импортов, ни строк файла вокруг неё».
+    Модель на 3B это правило не соблюдает. Живой прогон: на просьбу
+    поправить `random_answer` она вернула импорт, функцию и блок
+    `if __name__` целиком — и всё это встало на место одной функции.
+    Три реплики подряд — три блока `if __name__` в файле, из которых
+    работает первый, а остальные мёртвый код.
+
+    Правило в промпте не работает — значит, работать должен код.
+    Убирается только то, чему в файле есть точный двойник: импорт
+    такой же строкой и блок `__main__`, если он там уже стоит. Новое
+    в ответе не трогается: чтобы функция печатала производную, модели
+    иногда надо написать рядом ещё одну, и запрещать это значит
+    запрещать половину задач.
+
+    Ответ, который не разбирается сам по себе — например, тело метода
+    с отступом, — возвращается как есть: резать вслепую хуже, чем
+    не резать.
+    """
+    try:
+        tree = ast.parse(content)
+        known = ast.parse(file_text)
+    except (SyntaxError, ValueError):
+        return content, []
+
+    main_source = {
+        (ast.get_source_segment(file_text, node) or "").strip()
+        for node in known.body if _is_main_guard(node)
+    }
+    imports = {
+        ast.get_source_segment(file_text, node)
+        for node in known.body
+        if isinstance(node, (ast.Import, ast.ImportFrom))
+    }
+
+    lines = content.splitlines(keepends=True)
+    cut: set[int] = set()
+    notes: list[str] = []
+    for node in tree.body:
+        drop = ""
+        if _is_main_guard(node):
+            # Только ТОЧНАЯ копия. Блок, отличающийся от файла, — это
+            # правка, о которой просил человек, и молча выбросить её
+            # значит сделать прогон пустым: живой запрос «добавь выход
+            # из цикла» менял именно этот блок.
+            if (ast.get_source_segment(content, node) or "").strip() in main_source:
+                drop = "блок if __name__"
+        elif isinstance(node, (ast.Import, ast.ImportFrom)):
+            if ast.get_source_segment(content, node) in imports:
+                drop = ast.get_source_segment(content, node) or "импорт"
+        if not drop:
+            continue
+        cut.update(range(node.lineno - 1, node.end_lineno))
+        notes.append(drop)
+
+    if not cut:
+        return content, notes
+    kept = "".join(line for number, line in enumerate(lines) if number not in cut)
+    return kept.strip("\n") + "\n", notes
+
+
 def stray_definitions(path: str, before: str, after: str) -> list[str]:
     """Новые определения, которые правка засунула внутрь чужого блока.
 

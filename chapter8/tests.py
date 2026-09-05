@@ -61,6 +61,7 @@ from chapter8.src.edits import (
     same_tree,
     stray_definitions,
     syntax_ok,
+    trim_known_blocks,
     unified,
     without_docstring,
 )
@@ -2897,6 +2898,81 @@ class TestDepsNode:
         state = started(Plan("з", []), touched=["a.py", "b.py"])
         pipeline.node_deps(state)
         assert called == ["requests"]
+
+
+class TestTrimKnownBlocks:
+    """Ответ на «перепиши функцию» приходит с файлом вокруг неё.
+
+    Промпт правки функции запрещает это прямым текстом: «в поле content
+    — только эта функция, ни импортов, ни строк файла вокруг». Модель
+    на 3B правило не соблюдает. Живой прогон: на просьбу поправить
+    `random_answer` она вернула импорт, функцию и блок `if __name__`
+    целиком — и всё это встало на место одной функции.
+    """
+
+    FILE = (
+        'import random\n'
+        '\n'
+        'def answer():\n'
+        '    return 1\n'
+        '\n'
+        'if __name__ == "__main__":\n'
+        '    print(answer())\n'
+    )
+
+    def test_повтор_импорта_и_блока_режется(self):
+        answer = (
+            'import random\n'
+            '\n'
+            'def answer():\n'
+            '    return 2\n'
+            '\n'
+            'if __name__ == "__main__":\n'
+            '    print(answer())\n'
+        )
+        kept, notes = trim_known_blocks(self.FILE, answer)
+        assert notes == ["import random", "блок if __name__"]
+        assert kept == "def answer():\n    return 2\n"
+
+    def test_изменённый_блок_остаётся(self):
+        """Иначе прогон стал бы пустым: правка была именно в этом блоке.
+
+        Живой запрос «добавь возможность выйти из цикла по слову
+        „выход“» меняет ровно `if __name__`, и выбросить его молча
+        значит потерять то, о чём просили.
+        """
+        answer = (
+            'def answer():\n'
+            '    return 2\n'
+            '\n'
+            'if __name__ == "__main__":\n'
+            '    while True:\n'
+            '        if input() == "выход":\n'
+            '            break\n'
+        )
+        kept, notes = trim_known_blocks(self.FILE, answer)
+        assert notes == []
+        assert kept == answer
+
+    def test_новое_рядом_не_трогается(self):
+        """Чтобы функция печатала производную, рядом бывает нужна вторая."""
+        answer = "def answer():\n    return helper()\n\ndef helper():\n    return 1\n"
+        kept, notes = trim_known_blocks(self.FILE, answer)
+        assert notes == []
+        assert kept == answer
+
+    def test_новый_импорт_остаётся(self):
+        answer = "import math\n\ndef answer():\n    return math.pi\n"
+        kept, notes = trim_known_blocks(self.FILE, answer)
+        assert notes == []
+        assert "import math" in kept
+
+    def test_неразбирающийся_ответ_возвращается_как_есть(self):
+        """Тело метода с отступом резать вслепую хуже, чем не резать."""
+        answer = "    def answer(self):\n        return 2\n"
+        kept, notes = trim_known_blocks(self.FILE, answer)
+        assert kept == answer
+        assert notes == []
 
 
 class TestRepeatedImports:

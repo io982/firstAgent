@@ -92,6 +92,7 @@ from chapter8.src.edits import (
     same_tree,
     syntax_ok,
     top_definitions,
+    trim_known_blocks,
     without_docstring,
 )
 from chapter8.src.fs import (
@@ -1239,6 +1240,16 @@ def _edit_function(state: State, place: dict, detail: str, problem: str = "") ->
     content = _strip_fences(str(answer.get("content", "")))
     if not content.strip():
         return False, "модель вернула пустую функцию"
+
+    # Промпт просит ОДНУ функцию, а 3B возвращает её вместе с импортом
+    # и блоком `if __name__`. Всё это встаёт на место одной функции,
+    # и файл обрастает копиями: три реплики подряд — три блока
+    # `if __name__`, из которых работает первый. Правило в промпте
+    # не сработало — режем кодом, но только то, чему в файле есть
+    # точный двойник (см. trim_known_blocks).
+    content, trimmed = trim_known_blocks(_file_text(path), content)
+    if not content.strip():
+        return False, "в ответе не осталось ничего, кроме того, что в файле уже есть"
 
     # Имя проверяется до записи. Модель, которой показали одну функцию,
     # иногда возвращает соседнюю — а `replace_lines` подставит что дали
