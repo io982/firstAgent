@@ -1802,6 +1802,97 @@ class TestAskFilename:
         assert plan.steps[0].detail == task
 
 
+class TestFilenameShape:
+    """Имя от модели проверяется формой, а не списком одобренных языков.
+
+    Живой прогон: шесть задач подряд — на JS, bash, C++, C#, Pascal,
+    Go и Java. Bash прошёл, остальные пять дали план «создать main.py»,
+    и человек их отклонил. Модель язык понимала: она отвечала
+    `random_answer.js` и `main.cpp`, — но ответ сверялся со списком
+    расширений, где были Python и скрипты, и заменялся запасным именем.
+
+    Язык выбирает модель из контекста задачи. Код проверяет только то,
+    чего модель не гарантирует: что ответ — одно имя файла.
+    """
+
+    @pytest.mark.parametrize("name", ["random_answer.js", "main.cpp", "Program.cs",
+                                      "main.go", "RandomAnswer.java", "app.pas",
+                                      "lib.rs", "index.ts", "main.py", "run.bat"])
+    def test_имя_на_любом_языке_принимается(self, name):
+        assert planner_module.looks_like_filename(name)
+
+    @pytest.mark.parametrize("name", ["", "app", "просто текст", "два слова.py",
+                                      "src/main.js", "..py", ".gitignore", "мой.py"])
+    def test_не_имя_отвергается(self, name):
+        assert not planner_module.looks_like_filename(name)
+
+    @pytest.mark.parametrize("name", ["calc.exe", "lib.dll", "app.jar", "x.pyc"])
+    def test_двоичное_расширение_отвергается(self, name):
+        """Агент пишет текст. `calc.exe` — не выбор языка, а непонимание."""
+        assert not planner_module.looks_like_filename(name)
+
+    def test_имя_от_модели_доходит_до_плана(self, workspace, monkeypatch):
+        """Тот самый прогон: задача на JS больше не даёт main.py."""
+        monkeypatch.setattr(planner_module, "request_model",
+                            lambda *a, **k: json.dumps({"filename": "random_answer.js"}))
+        plan = make_plan("напиши консольное приложение на JS, отвечающее рандомно")
+
+        assert [s.target for s in plan.steps if s.action == "create"] == ["random_answer.js"]
+
+    def test_тесты_не_заводятся_к_чужому_языку(self, workspace, monkeypatch):
+        """Второй файл — это `test_x.py` и pytest, а их у JS нет."""
+        monkeypatch.setattr(planner_module, "request_model",
+                            lambda *a, **k: json.dumps({"filename": "app.js"}))
+        plan = make_plan("напиши приложение на JS с тестами")
+
+        assert [s.action for s in plan.steps] == ["create", "test"]
+
+
+class TestNamedFileOnOtherLanguages:
+    """Имя файла в задаче читается и тогда, когда язык не Python.
+
+    Живой прогон дал беду тише и хуже, чем `main.py`: слово `app.js`
+    именем файла не считалось, задача уходила по ветке «файл не
+    назван», и адресом становился последний изменённый файл. На просьбу
+    поправить `app.js` агент открывал `run.sh` — и увидеть это можно
+    было только в diff.
+    """
+
+    @pytest.fixture()
+    def mixed(self, workspace):
+        for name in ("app.js", "main.go", "run.sh", "calc.py"):
+            (workspace / name).write_text("x\n", encoding="utf-8")
+        return workspace
+
+    @pytest.mark.parametrize("name", ["app.js", "main.go", "run.sh", "calc.py"])
+    def test_названный_файл_становится_адресом(self, mixed, name):
+        assert plan_kind(f"поправь функцию answer в {name}") == ("fix", name)
+
+    def test_платформа_после_на_именем_файла_не_считается(self, workspace):
+        """`node.js` и `vue.js` выглядят именами файлов и ими не являются."""
+        assert named_file("напиши приложение на node.js") == ""
+        assert named_file("сделай приложение на vue.js") == ""
+        assert plan_kind("напиши приложение на node.js") == ("needs_name", "")
+
+    def test_после_на_существующий_файл_остаётся_именем(self, mixed):
+        """Отличить платформу от файла можно только тем, лежит ли он в каталоге."""
+        assert named_file("напиши тест на app.js") == "app.js"
+
+    def test_версия_именем_файла_не_становится(self, mixed):
+        """Ради этого список расширений и закрыт: без него имя — любое слово с точкой."""
+        assert named_file("версия 1.0 сломалась") == ""
+        assert named_file("сделай всё как надо. и побыстрее") == ""
+
+    def test_сокращение_с_точкой_именем_файла_не_становится(self, mixed):
+        assert named_file("поправь add в calc.py, т.е. она вычитает") == "calc.py"
+        assert named_file("не работает, т.е. падает") == ""
+
+    def test_поиск_по_проекту_видит_чужие_языки(self, mixed):
+        """Адрес правки ищется цитатой из задачи — по всем файлам, не только `.py`."""
+        (mixed / "app.js").write_text("function answerMe() { return 1; }\n", encoding="utf-8")
+        assert planner_module._first_hit("answerMe") == "app.js"
+
+
 class TestOverwrite:
     """Явный `create` перезаписывает файл, инструмент `write_file` — нет."""
 
