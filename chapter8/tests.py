@@ -36,6 +36,7 @@ from chapter7.src.graph import State
 from chapter7.src.models import using_model
 from chapter8.agent import handle
 from chapter8.src import codemap, env, guard, history, pipeline, pipeline_lg, review, shell
+from chapter8.src import fs as fs_module
 from chapter8.src import planner as planner_module
 from chapter8.src import session as session_module
 from chapter8.src.edits import (
@@ -3199,6 +3200,56 @@ class TestRepeatedImports:
         replace_lines("app.py", "3", "4", "import random\n\ndef f():\n    return 2\n")
 
         assert "убран повтор" in asked[0], "снять кодом — не значит снять молча"
+
+
+class TestOutputClipping:
+    """Вывод обрезается по границе строки, а не по символу.
+
+    Потолок вывода — единственный, который в чтении файла для правки
+    действительно срабатывает. Раньше рядом с ним стояла константа
+    «первые 120 строк», и число из неё попало в главу; на деле потолок
+    в символах отрабатывал первым, и до модели доезжало сорок с
+    небольшим строк, а последняя была обрублена посреди слова.
+
+    Обрубок — не мелочь: форма правки по умолчанию это цитата «было/
+    стало», и процитировать половину строки модель не может.
+    """
+
+    def test_короткий_вывод_не_трогается(self):
+        assert fs_module._clip("две\nстроки", limit=100) == "две\nстроки"
+
+    def test_обрезка_идёт_по_границе_строки(self):
+        text = "\n".join(f"строка номер {n}" for n in range(200))
+        clipped = fs_module._clip(text, limit=200)
+        body = clipped.split("\n\n[...обрезано")[0]
+
+        assert body.split("\n")[-1] in text.split("\n"), "последняя строка должна быть целой"
+        assert len(body) <= 200
+
+    def test_про_обрезку_сказано_вслух(self):
+        """Молча укороченный вывод модель считает полным."""
+        clipped = fs_module._clip("а" * 50 + "\n" + "б" * 50, limit=60)
+        assert "обрезано" in clipped
+
+    def test_файл_из_одной_длинной_строки_не_пустеет(self):
+        """Минифицированный JS: границы строки нет, и резать приходится по символу.
+
+        Иначе от вывода остался бы один заголовок — ни байта кода.
+        """
+        clipped = fs_module._clip("шапка\n" + "x" * 5000, limit=2000)
+        assert len(clipped) > 1900, "обрубок полезнее пустоты"
+
+    def test_чтение_для_правки_кончается_целой_строкой(self, workspace):
+        """Тот самый путь: узел правки кладёт в контекст начало файла."""
+        (workspace / "long.py").write_text(
+            "\n".join(f"value_{n} = 'строка достаточной длины, чтобы упереться в потолок'"
+                      for n in range(200)),
+            encoding="utf-8")
+        shown = read_lines("long.py", "1")
+        body = shown.split("\n\n[...обрезано")[0]
+
+        assert "обрезано" in shown, "потолок должен сработать"
+        assert body.rstrip().endswith("'"), "строка оборвана посреди литерала"
 
 
 class TestTopBlocks:

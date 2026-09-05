@@ -173,9 +173,6 @@ CODER_MODEL = os.environ.get("AGENT_CODER_MODEL", "")
 # и она обычно повторяет вторую.
 MAX_ATTEMPTS = 2
 
-# Сколько строк файла кладётся в контекст модели перед правкой.
-CONTEXT_LINES = 120
-
 # Сколько ждать, пока модель напишет файл целиком. Отдельно от общего
 # предела Главы 1: там 120 с на короткий ответ, а здесь генерация
 # на сотни токенов, и первый живой прогон на этом потерял файл тестов.
@@ -713,7 +710,15 @@ def _step_read(step, state: State) -> tuple[bool, str]:
     target = step.target.strip() or state.extra.get("path", "")
     if not target:
         return False, "нечего читать: файл не назван"
-    text = read_lines(target, "1", str(CONTEXT_LINES))
+    # Без верхней границы по строкам: сколько файла доедет до модели,
+    # решает потолок вывода инструментов — `fs.OUTPUT_LIMIT`, 2000
+    # символов. Здесь стояло «первые 120 строк», и это было неправдой:
+    # на файле со средней строкой длиннее шестнадцати символов потолок
+    # вывода срабатывал первым, до модели доезжало сорок с небольшим
+    # строк, а число в главе говорило о ста двадцати. Два потолка на
+    # одно и то же — способ рассказывать про тот из них, который
+    # ни разу не сработал.
+    text = read_lines(target, "1")
     if text.startswith("Нет такого файла"):
         return False, text
     state.retrieved = text
@@ -1112,7 +1117,7 @@ def _step_edit(step, state: State) -> tuple[bool, str]:
         seen = state.extra.get("failure") or _seen_error(state, path)
         state.extra["failure"] = seen
 
-    state.retrieved = read_lines(path, "1", str(CONTEXT_LINES))
+    state.retrieved = read_lines(path, "1")
     state.extra["path"] = path
 
     # Место известно с точностью до функции — правим её одну. Модели
@@ -1679,14 +1684,14 @@ def _read_pair(state: State, path: str) -> str:
     который агент не имеет права менять, значит звать его туда,
     куда ему нельзя.
     """
-    text = f"Файл {path}:\n{read_lines(path, '1', str(CONTEXT_LINES))}"
+    text = f"Файл {path}:\n{read_lines(path, '1')}"
 
     name = path.rsplit("/", 1)[-1]
     prefix = path[: len(path) - len(name)]
     counterpart = prefix + (name[len("test_"):] if name.startswith("test_") else f"test_{name}")
 
     if counterpart in state.extra.get("touched", []):
-        text += f"\n\nПарный файл {counterpart}:\n{read_lines(counterpart, '1', str(CONTEXT_LINES))}"
+        text += f"\n\nПарный файл {counterpart}:\n{read_lines(counterpart, '1')}"
     return text
 
 
