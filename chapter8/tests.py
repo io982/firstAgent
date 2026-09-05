@@ -92,6 +92,7 @@ from chapter8.src.planner import (
     fallback_plan,
     make_plan,
     named_file,
+    one_file_plan,
     parse_plan,
     plan_kind,
     plan_schema,
@@ -1891,6 +1892,69 @@ class TestNamedFileOnOtherLanguages:
         """Адрес правки ищется цитатой из задачи — по всем файлам, не только `.py`."""
         (mixed / "app.js").write_text("function answerMe() { return 1; }\n", encoding="utf-8")
         assert planner_module._first_hit("answerMe") == "app.js"
+
+
+class TestTestsForNamedFile:
+    """«Напиши тест на calc.py» — цель `test_calc.py`, а не `calc.py`.
+
+    Названный файл бывает не целью, а ссылкой. Один такой случай глава
+    уже знала — «сделай bat файл для запуска calc.py», — а этот
+    пропустила: глагол создания плюс названный файл давали план
+    «создать calc.py», и агент переписывал файл, о котором просили один
+    лишь тест. Существующий код при этом терялся молча: перезапись
+    названного файла — законная операция, и ни одна проверка записи
+    возразить тут не может.
+
+    Отличается это порядком слов, и другого признака нет: «напиши тест
+    на calc.py» — сначала тест, потом файл; «напиши calc.py и тесты» —
+    наоборот, и там просят обе вещи.
+    """
+
+    @pytest.fixture()
+    def project(self, workspace):
+        for name in ("calc.py", "app.js", "test_calc.py"):
+            (workspace / name).write_text("x\n", encoding="utf-8")
+        return workspace
+
+    @pytest.mark.parametrize("task", ["напиши тест на calc.py",
+                                      "напиши тесты к calc.py",
+                                      "покрой тестами calc.py"])
+    def test_целью_становится_файл_тестов(self, project, task):
+        assert plan_kind(task) == ("one_file", "test_calc.py")
+
+    @pytest.mark.parametrize("task", ["напиши тест на calc.py",
+                                      "напиши тесты к calc.py",
+                                      "покрой тестами calc.py"])
+    def test_названный_файл_не_переписывается(self, project, task):
+        targets = [step.target for step in fallback_plan(task).steps]
+        assert "calc.py" not in targets, "просили тест, а не переписать файл"
+        assert targets == ["test_calc.py", ""]
+
+    def test_обе_вещи_просят_другим_порядком_слов(self, project):
+        """«напиши calc.py и тесты» — здесь файл действительно цель."""
+        plan = fallback_plan("напиши calc.py и тесты")
+        assert [s.target for s in plan.steps] == ["calc.py", "test_calc.py", ""]
+
+    def test_файл_тестов_не_обрастает_вторым_файлом_тестов(self, project):
+        """Иначе к `test_calc.py` заводился бы `test_test_calc.py`."""
+        steps = [s.target for s in one_file_plan("напиши тесты", "test_calc.py").steps]
+        assert steps == ["test_calc.py", ""]
+
+    def test_правка_теста_адресуется_тестом(self, project):
+        """Глагол правки — значит правим, и правим тот файл, о котором речь."""
+        assert plan_kind("поправь тест на calc.py") == ("fix", "test_calc.py")
+
+    def test_правка_самого_файла_адресуется_им(self, project):
+        assert plan_kind("поправь функцию add в calc.py") == ("fix", "calc.py")
+
+    def test_тест_к_чужому_языку_называет_модель(self, project):
+        """`app.test.js` в одном языке, `AppTest.java` в другом — это не наше дело."""
+        assert plan_kind("напиши тест на app.js") == ("needs_name", "")
+
+    def test_имя_файла_тестов(self):
+        assert planner_module.test_file_for("calc.py") == "test_calc.py"
+        assert planner_module.test_file_for("src/calc.py") == "test_calc.py"
+        assert planner_module.test_file_for("test_calc.py") == "test_calc.py"
 
 
 class TestOverwrite:

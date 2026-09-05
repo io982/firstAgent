@@ -546,6 +546,34 @@ def wants_tests(task: str) -> bool:
     return matches(f" {task.lower().strip()} ", TEST_WORDS)
 
 
+def test_file_for(named: str) -> str:
+    """Имя файла тестов к названному файлу: `calc.py` → `test_calc.py`."""
+    name = named.rsplit("/", 1)[-1]
+    return name if name.startswith("test_") else f"test_{name}"
+
+
+def asks_tests_for(task: str, named: str) -> bool:
+    """Просят ли ТЕСТ К названному файлу, а не сам этот файл.
+
+    Пара к `asks_other_kind`, и беда у них общая: имя файла в задаче
+    есть, но оно не цель, а ссылка. «Напиши тест на calc.py» просит
+    завести `test_calc.py`, а `calc.py` только называет — между тем
+    глагол создания и названный файл давали план «создать calc.py»,
+    то есть агент переписывал файл, о котором просили один лишь тест.
+
+    Отличается это порядком слов, и другого признака нет: «напиши тест
+    на calc.py» — сначала тест, потом файл; «напиши calc.py и тесты» —
+    наоборот, и там просят обе вещи. Предлог для этого не годится:
+    «покрой тестами calc.py» обходится без него.
+    """
+    if not named:
+        return False
+    lowered = task.lower()
+    where_file = lowered.find(named.lower())
+    where_test = lowered.find("тест")
+    return 0 <= where_test < where_file
+
+
 # Слова, которыми просят КАРКАС: файл с определениями и описаниями,
 # но без кода внутри. Это законный результат работы, а не недоделка,
 # и узнать его надо ДО того, как писателю уйдут правила «никаких
@@ -771,6 +799,24 @@ def plan_kind(task: str) -> tuple[str, str]:
         return KIND_MODEL, ""
 
     named = named_file(task)
+
+    # Названный файл — то, что тестируют, а не то, что пишут.
+    if named and asks_tests_for(task, named):
+        if not matches(lowered, EDIT_VERBS):
+            if named.endswith(".py"):
+                return KIND_ONE_FILE, test_file_for(named)
+            # Тест к файлу на другом языке — тоже отдельный файл, но как
+            # его назвать, знает модель, а не мы: `app.test.js` в одном
+            # языке, `AppTest.java` в другом.
+            return KIND_NEEDS_NAME, ""
+        # Правят тест — значит и адрес правки его, если он существует.
+        try:
+            existing = guard.resolve_path(test_file_for(named))
+        except guard.OutsideWorkspace:
+            existing = None
+        if existing is not None and existing.is_file():
+            return KIND_FIX, guard.relative(existing)
+
     if named and not asks_other_kind(task, named):
         if matches(lowered, CREATE_VERBS):
             return KIND_ONE_FILE, named
@@ -916,8 +962,11 @@ def one_file_plan(task: str, target: str) -> Plan:
     проверить на правильность, а провалиться он умеет.
     """
     steps = [Step(CREATE, target, task, "задача сводится к одному файлу")]
-    if wants_tests(task) and target.endswith(".py"):
-        name = target.rsplit("/", 1)[-1]
+    name = target.rsplit("/", 1)[-1]
+    # `not name.startswith("test_")` — иначе к `test_calc.py` заводился бы
+    # ещё и `test_test_calc.py`: слово «тест» в задаче есть, а цель уже
+    # и есть файл тестов.
+    if wants_tests(task) and target.endswith(".py") and not name.startswith("test_"):
         steps.append(
             Step(CREATE, f"test_{name}", f"тесты к {target} по задаче: {task}", "задача просит тесты")
         )
