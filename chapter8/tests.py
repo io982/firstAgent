@@ -2968,6 +2968,26 @@ class TestForgottenImports:
         _, text = self.deps("print(math.sqrt(4))\n")
         assert "import math" not in text
 
+    def test_работает_не_только_с_math(self, workspace):
+        """Стандартная библиотека целиком, а не список избранных модулей."""
+        for code, name in (("json.dumps({})", "json"),
+                           ("re.findall('x', s)", "re"),
+                           ("random.choice([1])", "random"),
+                           ("pathlib.Path('.')", "pathlib")):
+            assert env.forgotten_imports(code + chr(10), [name]) == [name], code
+
+    def test_починка_тоже_дописывает_импорт(self, workspace, monkeypatch):
+        """Круг починки чаще всего забывает ровно импорт."""
+        (workspace / "calc.py").write_text("def area(r):\n    return 1\n", encoding="utf-8")
+        monkeypatch.setattr(pipeline, "request_model",
+                            fake_model([edit_answer("calc.py", 2, 2, "    return math.pi * r * r")]))
+        state = started(Plan("з", []), touched=["calc.py"])
+        state.extra["path"] = "calc.py"
+        pipeline.node_edit(state)
+
+        assert state.extra["edit_ok"]
+        assert (workspace / "calc.py").read_text(encoding="utf-8").startswith("import math")
+
     def test_проверка_после_починки_зелёная(self, workspace):
         """Ради этого всё и делается: круг починки не понадобился."""
         state, _ = self.deps("print(math.sqrt(4))\n")

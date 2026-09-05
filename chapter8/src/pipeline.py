@@ -1734,6 +1734,7 @@ def node_edit(state: State) -> State:
         state.extra["edit_ok"] = guard.change_count() > before
         if state.extra["edit_ok"]:
             state.extra["edit_form"] = "function"
+            _add_forgotten_imports(state)
             return state
 
     before = guard.change_count()
@@ -1750,6 +1751,12 @@ def node_edit(state: State) -> State:
     state.extra["edit_ok"] = guard.change_count() > before
     if state.extra["edit_ok"]:
         _remember(state, path)
+        # Починка тоже умеет забыть импорт — и чаще всего забывает
+        # ровно его: модель переписывает функцию, зовёт в ней `math.sqrt`
+        # и не смотрит на шапку файла. Круг, потраченный на это, —
+        # круг, потраченный впустую, поэтому вычислимое чинится сразу,
+        # до следующей проверки.
+        _add_forgotten_imports(state)
     return state
 
 
