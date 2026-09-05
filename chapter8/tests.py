@@ -1760,6 +1760,52 @@ class TestEditWithoutName:
         assert plan_kind("добавь ожидание ввода") == ("needs_name", "")
 
 
+class TestRecentFileOnOtherLanguages:
+    """«Тот, над чем работали» — файл на любом языке, а не только на Python.
+
+    Живой прогон, две реплики подряд. Первая: «напиши консольное
+    приложение на JS» — агент завёл `console_app.js`, всё верно.
+    Вторая: «добавь, чтобы оно не закрывалось сразу» — файла не назвала,
+    адрес искался среди «того, над чем работали», а список там был
+    из пяти расширений, питоновских и скриптовых. `.js` в нём не было,
+    и агент вместо правки завёл новый `app_stay_open.py` с `print`,
+    после чего объявил прогон зелёным: линтер по питоновскому файлу
+    отработал и претензий не нашёл.
+
+    Отсюда правило, стоящее теперь в коде: список считается ИЗ
+    `CODE_SUFFIXES` вычитанием заметок и настроек, а не пишется рядом
+    руками. Два перечисления одного и того же разъезжаются — в этой
+    главе уже дважды.
+    """
+
+    TASK = "добавь в наше приложение чтобы оно не закрывалось сразу после вывода ответа"
+
+    @pytest.mark.parametrize("name", ["console_app.js", "main.go", "App.java",
+                                      "main.cpp", "app.ts", "run.sh", "calc.py"])
+    def test_код_на_любом_языке_становится_адресом(self, workspace, name):
+        (workspace / name).write_text("x\n", encoding="utf-8")
+        assert plan_kind(self.TASK) == ("fix", name)
+
+    @pytest.mark.parametrize("name", ["notes.md", "config.json", "data.yaml", "readme.txt"])
+    def test_заметки_и_настройки_адресом_не_становятся(self, workspace, name):
+        """Ради этого список и уже, чем CODE_SUFFIXES.
+
+        «Исправь: оно не должно закрываться» — про работающую программу,
+        а не про заметки рядом с ней; иначе адресом стал бы свежий
+        `SKILL.md`, тронутый совсем по другому поводу.
+        """
+        (workspace / name).write_text("x\n", encoding="utf-8")
+        assert planner_module.recent_file() == ""
+
+    def test_список_считается_из_общего_а_не_пишется_рядом(self):
+        """Проверка от разъезжания: языки берутся из одного места."""
+        assert set(planner_module.RUNNABLE_SUFFIXES) < set(planner_module.CODE_SUFFIXES)
+        assert set(planner_module.RUNNABLE_SUFFIXES).isdisjoint(
+            planner_module.NOT_CODE_SUFFIXES)
+        for suffix in (".js", ".go", ".java", ".cs", ".cpp", ".rs"):
+            assert suffix in planner_module.RUNNABLE_SUFFIXES
+
+
 class TestAskFilename:
     """Единственное, что кодом не выводится, — имя файла."""
 
