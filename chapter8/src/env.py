@@ -110,6 +110,55 @@ def imported_modules(text: str) -> list[str]:
     return seen
 
 
+def used_as_module(text: str) -> set[str]:
+    """Имена, к которым код обращается точкой: `math.sqrt`, `json.loads`.
+
+    Отличать такое обращение от простого имени нужно, чтобы не чинить
+    ошибку не тем лекарством. `print(string)` — это скорее всего забытая
+    переменная, а `string.capwords(s)` — забытый импорт, хотя линтер
+    в обоих случаях скажет одно и то же: имя не определено.
+    """
+    try:
+        tree = ast.parse(text)
+    except (SyntaxError, ValueError):
+        return set()
+
+    names = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
+            names.add(node.value.id)
+    return names
+
+
+def forgotten_imports(text: str, undefined: list[str]) -> list[str]:
+    """Какие из ненайденных имён — это забытый `import`, а не беда в коде.
+
+    Самая частая осечка модели на 3B выглядит так: код зовёт
+    `math.sqrt(d)`, а строки `import math` в файле нет. Линтер видит
+    её сразу, но чинить отправляет модель — и та отвечает чем угодно,
+    вплоть до дописывания импорта в КОНЕЦ файла, после вызова, который
+    падает. Между тем ответ здесь вычислим целиком, и спрашивать
+    о нём модель незачем.
+
+    Условий два, и оба обязательны:
+
+      * имя обращается как модуль (`math.sqrt`, а не просто `math`) —
+        иначе мы бы «чинили» забытую переменную импортом;
+      * имя есть в СТАНДАРТНОЙ библиотеке. Стороннее имя сюда не
+        попадает намеренно: `import calculator` не значит, что с PyPI
+        надо тянуть пакет `calculator`, — этой бедой глава уже болела,
+        и лечится она в другом месте (`_planned_modules`).
+
+    Имена, не прошедшие оба условия, остаются линтеру: он о них скажет,
+    а решать будет человек.
+    """
+    modules = used_as_module(text)
+    return [
+        name for name in undefined
+        if name in modules and name in sys.stdlib_module_names
+    ]
+
+
 def local_modules() -> set[str]:
     """Имена модулей, которые лежат в самом проекте.
 

@@ -122,6 +122,7 @@ from chapter8.src.shell import (
     clip,
     execute,
     lint_problems,
+    undefined_names,
 )
 
 # Модель, которая ПИШЕТ и ЧИНИТ код. Отдельная от модели разговора
@@ -1409,13 +1410,62 @@ def node_deps(state: State) -> State:
                 missing.append(package)
 
     state.extra["missing_packages"] = missing
-    if not missing:
-        return state
+    if missing:
+        result = env.install(" ".join(missing))
+        state.extra["deps_result"] = result
+        state.extra.setdefault("log", []).append(f"зависимости: {result}")
 
-    result = env.install(" ".join(missing))
-    state.extra["deps_result"] = result
-    state.extra.setdefault("log", []).append(f"зависимости: {result}")
+    _add_forgotten_imports(state)
     return state
+
+
+def _add_forgotten_imports(state: State) -> None:
+    """Дописывает `import X` там, где код зовёт модуль, но не импортирует его.
+
+    Зависимости бывают двух видов, и второй долго оставался без
+    механизма. Внешняя — пакета нет в окружении, её ставят из сети
+    и спрашивают человека. Внутренняя — пакет на месте, но в файле
+    нет строки `import`. Второе на 3B случается куда чаще: код зовёт
+    `math.sqrt(d)`, импорта нет, программа падает `NameError` на первой
+    же строке.
+
+    Раньше это чинила модель, и чинила плохо. Живой прогон: человек
+    принёс traceback «name 'math' is not defined», модель ответила
+    `import math` — и строка приехала в конец файла, после вызова,
+    который падал. Между тем ответ вычислим целиком: линтер называет
+    имя, `env.forgotten_imports` отсеивает то, что импортом не лечится,
+    а место для импорта в Python ровно одно.
+
+    Пишется это обычным путём записи — через `append_to_file`, то есть
+    через подтверждение человеком, показ diff и журнал отката. Агент,
+    который правит файл молча, не становится лучше оттого, что правка
+    механическая.
+    """
+    fixed: list[str] = []
+    for path in state.extra.get("touched", []):
+        if not path.endswith(".py"):
+            continue
+        unknown = undefined_names(path)
+        if not unknown:
+            continue
+        try:
+            text = guard.resolve_path(path).read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError, guard.OutsideWorkspace):
+            continue
+
+        names = env.forgotten_imports(text, unknown)
+        if not names:
+            continue
+        # Одним блоком, а не по строчке на вызов: подтверждение человеку
+        # показывается на каждую запись, и три вопроса подряд про три
+        # импорта — это ровно та кнопка «y», которую жмут не глядя.
+        block = "".join(f"import {name}\n" for name in sorted(names))
+        answer = append_to_file(path, block)
+        fixed.append(f"{path}: {', '.join(sorted(names))} — {answer}")
+
+    if fixed:
+        state.extra["added_imports"] = fixed
+        state.extra.setdefault("log", []).append("забытые импорты: " + "; ".join(fixed))
 
 
 def node_verify(state: State) -> State:

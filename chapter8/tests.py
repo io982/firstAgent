@@ -2898,6 +2898,100 @@ class TestDepsNode:
         assert called == ["requests"]
 
 
+class TestForgottenImports:
+    """Забытый `import` — зависимость внутри файла, и чинится она кодом.
+
+    Самая частая осечка модели на 3B за всю главу: код зовёт
+    `math.sqrt(d)`, строки `import math` в файле нет, программа падает
+    NameError на первой же строке. Раньше это чинила модель — и однажды
+    ответила `import math`, приписав его в КОНЕЦ файла, после вызова,
+    который падал. Ответ здесь вычислим целиком, поэтому его считает код.
+    """
+
+    def deps(self, source, touched=("app.py",)):
+        """Пишет файл и прогоняет узел зависимостей."""
+        workspace = guard.get_workspace()
+        (workspace / "app.py").write_text(source, encoding="utf-8")
+        state = started(Plan("з", [Step("create", "app.py", "")]), touched=list(touched))
+        pipeline.node_deps(state)
+        return state, (workspace / "app.py").read_text(encoding="utf-8")
+
+    def test_забытый_импорт_дописывается(self, workspace):
+        state, text = self.deps("print(math.sqrt(4))\n")
+        assert text.startswith("import math")
+        assert "math" in " ".join(state.extra["added_imports"])
+
+    def test_импорт_встаёт_наверх_а_не_в_конец(self, workspace):
+        """Импорт после вызова не спасает: вызов уже упал."""
+        _, text = self.deps(
+            "def solve(d):\n"
+            "    return math.sqrt(d)\n"
+            "\n"
+            "print(solve(4))\n"
+        )
+        assert text.splitlines()[0] == "import math"
+
+    def test_простое_имя_импортом_не_чинится(self, workspace):
+        """`print(nothing)` — забытая переменная, а не забытый модуль."""
+        state, text = self.deps("print(nothing)\n")
+        assert state.extra.get("added_imports") is None
+        assert "import" not in text
+
+    def test_стороннее_имя_из_сети_не_тянется(self, workspace):
+        """Механизм чинит только стандартную библиотеку.
+
+        `requests.get(...)` без импорта — тоже забытый импорт, но
+        поставить его значит пойти в сеть за пакетом с подходящим
+        именем. Этой бедой глава уже болела на `import calculator`,
+        и лечится она не здесь.
+        """
+        state, text = self.deps("print(requests.get('u'))\n")
+        assert state.extra.get("added_imports") is None
+        assert "import requests" not in text
+
+    def test_уже_импортированное_не_дублируется(self, workspace):
+        state, text = self.deps("import math\nprint(math.sqrt(4))\n")
+        assert state.extra.get("added_imports") is None
+        assert text.count("import math") == 1
+
+    def test_несколько_модулей_одним_блоком(self, workspace):
+        """Три вопроса подряд про три импорта — это кнопка «y» не глядя."""
+        asked = []
+        guard.set_policy(mode=guard.ASK, confirm=lambda a, d: asked.append(a) or True)
+        _, text = self.deps("print(math.sqrt(4), json.dumps({}))\n")
+
+        assert text.startswith("import json\nimport math")
+        assert len(asked) == 1, "одна запись — один вопрос"
+
+    def test_отказ_человека_ничего_не_пишет(self, workspace):
+        guard.set_policy(mode=guard.ASK, confirm=lambda a, d: False)
+        _, text = self.deps("print(math.sqrt(4))\n")
+        assert "import math" not in text
+
+    def test_проверка_после_починки_зелёная(self, workspace):
+        """Ради этого всё и делается: круг починки не понадобился."""
+        state, _ = self.deps("print(math.sqrt(4))\n")
+        pipeline.node_verify(state)
+        assert state.extra["tests_green"], state.extra["failure"]
+
+
+class TestUsedAsModule:
+    """Обращение точкой отличает забытый импорт от забытой переменной."""
+
+    def test_точка_считается_обращением_к_модулю(self):
+        assert env.used_as_module("math.sqrt(4)\n") == {"math"}
+
+    def test_простое_имя_не_считается(self):
+        assert env.used_as_module("print(math)\n") == set()
+
+    def test_сломанный_файл_молчит(self):
+        assert env.used_as_module("def f(:\n") == set()
+
+    def test_стандартная_библиотека_отбирается(self):
+        text = "math.sqrt(4)\nrequests.get('u')\n"
+        assert env.forgotten_imports(text, ["math", "requests"]) == ["math"]
+
+
 class TestPlannedModules:
     """Свой модуль не ищется в сети, даже если файл не написался."""
 
