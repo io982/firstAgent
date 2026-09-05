@@ -52,6 +52,7 @@ from chapter8.src.edits import (
     apply_lines,
     definitions,
     describe_forms,
+    drop_repeated_blocks,
     drop_repeated_imports,
     edit_schema,
     filled_bodies,
@@ -61,6 +62,7 @@ from chapter8.src.edits import (
     same_tree,
     stray_definitions,
     syntax_ok,
+    top_blocks,
     trim_known_blocks,
     unified,
     without_docstring,
@@ -3042,6 +3044,173 @@ class TestRepeatedImports:
         replace_lines("app.py", "3", "4", "import random\n\ndef f():\n    return 2\n")
 
         assert "убран повтор" in asked[0], "снять кодом — не значит снять молча"
+
+
+class TestTopBlocks:
+    """Нарезка на верхнеуровневые куски — единственный адрес без `ast`.
+
+    Всё остальное, что глава умеет считать, устроено на разборе Python:
+    карта функций, проверка синтаксиса при записи, забытые импорты,
+    вердикт линтера. На файле JS от этого не остаётся ничего. Заголовок
+    блока — адрес, который виден глазом, и потому переносится на любой
+    язык, где верхний уровень стоит в колонке 0.
+    """
+
+    def test_питон_режется_по_определениям(self):
+        heads = [head for head, _ in top_blocks(
+            'import random\n\ndef f():\n    return 1\n\n'
+            'if __name__ == "__main__":\n    f()\n')]
+        assert heads == ["import random", "def f():", 'if __name__ == "__main__":']
+
+    def test_фигурные_языки_режутся_так_же(self):
+        heads = [head for head, _ in top_blocks(
+            "import fs from 'fs';\n\nfunction f() {\n  return 1;\n}\n\n"
+            "if (require.main === module) {\n  f();\n}\n")]
+        assert heads == ["import fs from 'fs';", "function f() {",
+                         "if (require.main === module) {"]
+
+    def test_закрывающая_скобка_блока_не_начинает(self):
+        """`}` и `} else {` стоят в колонке 0 наравне с `if`.
+
+        Принять их за начало значит разрезать один блок пополам —
+        и тогда «повтор» найдётся там, где его нет.
+        """
+        heads = [head for head, _ in top_blocks(
+            "function f() {\n  if (a) {\n    b();\n  }\n} else {\n  c();\n}\n")]
+        assert heads == ["function f() {"]
+
+    def test_комментарий_блока_не_начинает(self):
+        heads = [head for head, _ in top_blocks("# про f\ndef f():\n    return 1\n")]
+        assert heads == ["def f():"]
+
+    def test_тело_идёт_вместе_с_заголовком(self):
+        _, body = top_blocks("def f():\n    return 1\n")[0]
+        assert body == "def f():\n    return 1"
+
+
+class TestRepeatedBlocks:
+    """Изменённый блок кладётся поверх старого, а не рядом с ним.
+
+    Открытый хвост живого прогона: `trim_known_blocks` намеренно
+    оставляет блок запуска, если модель его изменила, — в нём и была
+    просимая правка. Но кладётся он на место функции, и старый блок
+    остаётся ниже. Работает первый, второй — мёртвый код, и ни линтер,
+    ни проверка синтаксиса такого не видят.
+
+    Правило здесь без единого имени из Python: заголовок блока после
+    правки встретился дважды, а одна из копий дословно совпадает
+    со старой — она и лишняя.
+    """
+
+    FILE = ('import random\n\ndef answer():\n    return 1\n\n'
+            'if __name__ == "__main__":\n    print(answer())\n')
+
+    def test_старая_копия_убирается_а_изменённая_остаётся(self):
+        after = ('import random\n\ndef answer():\n    return 2\n\n'
+                 'if __name__ == "__main__":\n    while True:\n        break\n\n'
+                 'if __name__ == "__main__":\n    print(answer())\n')
+        text, notes = drop_repeated_blocks(self.FILE, after)
+
+        assert notes == ['if __name__ == "__main__":']
+        assert text.count('if __name__') == 1
+        assert "while True" in text, "остаться должна именно правка"
+
+    def test_то_же_самое_на_js(self):
+        """Ни `__name__`, ни `def` — механизм их и не знает."""
+        before = ("function answer() {\n  return 1;\n}\n\n"
+                  "if (require.main === module) {\n  console.log(answer());\n}\n")
+        after = ("function answer() {\n  return 2;\n}\n\n"
+                 "if (require.main === module) {\n  while (true) { break; }\n}\n\n"
+                 "if (require.main === module) {\n  console.log(answer());\n}\n")
+        text, notes = drop_repeated_blocks(before, after)
+
+        assert notes == ["if (require.main === module) {"]
+        assert text.count("require.main") == 1
+        assert "while (true)" in text
+
+    def test_две_одинаковые_новые_копии_схлопываются(self):
+        after = 'if x:\n    a = 1\n\nif x:\n    a = 1\n'
+        text, notes = drop_repeated_blocks("", after)
+
+        assert notes == ["if x:"]
+        assert text == 'if x:\n    a = 1\n'
+
+    def test_чужой_беспорядок_не_трогается(self):
+        """Два одинаковых блока были в файле до нас — так и останется."""
+        before = 'if x:\n    a = 1\n\nif x:\n    a = 1\n'
+        text, notes = drop_repeated_blocks(before, before + "\nb = 2\n")
+
+        assert notes == []
+        assert text.count("if x:") == 2
+
+    def test_две_разные_версии_не_трогаются(self):
+        """Какая из двух непохожих копий нужна человеку — не вычислимо."""
+        after = 'if x:\n    a = 1\n\nif x:\n    a = 2\n'
+        text, notes = drop_repeated_blocks("", after)
+
+        assert notes == []
+        assert text == after
+
+    def test_однострочник_блоком_не_считается(self):
+        """«Напечатай это дважды» — законная просьба, а не повтор."""
+        text, notes = drop_repeated_blocks('print("hi")\n', 'print("hi")\nprint("hi")\n')
+
+        assert notes == []
+        assert text.count("print") == 2
+
+    def test_обычная_правка_проходит_насквозь(self):
+        text, notes = drop_repeated_blocks("def f():\n    return 1\n",
+                                           "def f():\n    return 2\n")
+        assert notes == []
+        assert text == "def f():\n    return 2\n"
+
+    def test_на_записи_второй_блок_не_доезжает_до_диска(self, workspace):
+        """Тот самый прогон целиком: ответ модели идёт на место функции."""
+        (workspace / "app.py").write_text(self.FILE, encoding="utf-8")
+        answer = replace_lines("app.py", "3", "4",
+                               'def answer():\n    return 2\n\n'
+                               'if __name__ == "__main__":\n    while True:\n        break\n')
+        text = (workspace / "app.py").read_text(encoding="utf-8")
+
+        assert "Заменены" in answer
+        assert text.count('if __name__') == 1
+        assert "while True" in text
+
+    def test_на_записи_работает_и_для_не_питона(self, workspace):
+        """Единственный механизм главы, доживающий до файла на JS."""
+        (workspace / "app.js").write_text(
+            "function answer() {\n  return 1;\n}\n\n"
+            "if (require.main === module) {\n  console.log(answer());\n}\n",
+            encoding="utf-8")
+        replace_lines("app.js", "1", "3",
+                      "function answer() {\n  return 2;\n}\n\n"
+                      "if (require.main === module) {\n  while (true) { break; }\n}\n")
+        text = (workspace / "app.js").read_text(encoding="utf-8")
+
+        assert text.count("require.main") == 1
+        assert "while (true)" in text
+
+    def test_человеку_говорят_что_схлопнули(self, workspace):
+        (workspace / "app.py").write_text(self.FILE, encoding="utf-8")
+        asked = []
+        guard.set_policy(mode=guard.ASK, confirm=lambda a, d: asked.append(a) or True)
+        replace_lines("app.py", "3", "4",
+                      'def answer():\n    return 2\n\n'
+                      'if __name__ == "__main__":\n    while True:\n        break\n')
+
+        assert "лёг поверх старого" in asked[0], "снять кодом — не значит снять молча"
+
+    def test_сломанное_схлопывание_не_пишется(self, workspace):
+        """Нарезка текстовая, а значит ошибиться может.
+
+        Если после схлопывания файл перестал бы разбираться, пишется
+        то, что проверено, а не то, что аккуратнее выглядит.
+        """
+        (workspace / "app.py").write_text("x = 1\n", encoding="utf-8")
+        answer = replace_lines("app.py", "1", "1", "def f(\n    return 1\n")
+
+        assert "отменена" in answer
+        assert (workspace / "app.py").read_text(encoding="utf-8") == "x = 1\n"
 
 
 class TestForgottenImports:

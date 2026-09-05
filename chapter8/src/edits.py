@@ -538,6 +538,118 @@ def drop_repeated_imports(before: str, after: str) -> tuple[str, list[str]]:
     return "".join(out), dropped
 
 
+# Символы, с которых верхнеуровневый блок не начинается. В фигурных
+# языках `}` и `} else {` стоят в той же колонке, что и `if`, и принять
+# их за начало нового блока значит разрезать один блок пополам.
+CLOSING = "}])"
+
+
+def _starts_block(line: str) -> bool:
+    """Строка начинает верхнеуровневый блок.
+
+    Определение нарочно не знает ни одного языка: блок начинается там,
+    где строка стоит в колонке 0 и не является закрывающей скобкой или
+    комментарием. `def`, `function`, `func`, `class`, `if` — всё это
+    попадает под правило само, без списка ключевых слов на каждый язык.
+    """
+    body = line.strip()
+    if not body or line[0].isspace():
+        return False
+    if body[0] in CLOSING:
+        return False
+    return not body.startswith(("#", "//", "/*", "*", "--"))
+
+
+def _blocks(text: str) -> list[tuple[str, str, int, int]]:
+    """Заголовок, тело, первая строка, строка за последней."""
+    lines = text.splitlines(keepends=True)
+    heads = [number for number, line in enumerate(lines) if _starts_block(line)]
+    found = []
+    for place, start in enumerate(heads):
+        end = heads[place + 1] if place + 1 < len(heads) else len(lines)
+        found.append((lines[start].rstrip(), "".join(lines[start:end]).rstrip(), start, end))
+    return found
+
+
+def top_blocks(text: str) -> list[tuple[str, str]]:
+    """Верхнеуровневые куски текста: заголовок и всё, что под ним.
+
+    Заголовок — это адрес блока, и он текстовый. Всё остальное в главе
+    адресует код разбором `ast`, то есть только Python: карта функций,
+    проверка синтаксиса, забытые импорты. Здесь адреса хватает такого,
+    какой виден глазом, — и потому это единственный механизм главы,
+    который работает на файле любого языка.
+    """
+    return [(head, body) for head, body, _, _ in _blocks(text)]
+
+
+def drop_repeated_blocks(before: str, after: str) -> tuple[str, list[str]]:
+    """Изменённый блок кладётся ПОВЕРХ старого, а не рядом с ним.
+
+    Живой прогон: модель просят поправить функцию, а она возвращает
+    функцию вместе с блоком запуска — и в изменённом виде, потому что
+    человек просил «добавить выход из цикла» именно там. Выбросить
+    такой блок нельзя, это и есть просимая правка (см. trim_known_blocks),
+    а вставляется он на место функции — и старый блок остаётся ниже.
+    Файл получает два блока запуска, работает первый.
+
+    Отсюда правило, в котором нет ни одного имени из Python: если после
+    правки в файле появился второй блок с тем же заголовком, а тот из
+    них, что совпадает со старым дословно, — лишний. Остаётся
+    изменённый.
+
+    Чего эта функция не делает намеренно:
+
+      * не трогает заголовок, который повторялся в файле и ДО правки:
+        это чужой беспорядок, не наш;
+      * не считает блоком строку без тела: два одинаковых `print(...)`
+        подряд бывают именно тем, о чём просили;
+      * молчит, когда все копии отличаются и от старой, и друг от друга:
+        какая из двух разных версий нужна человеку — не вычислимо.
+    """
+    fresh = _blocks(after)
+    if not fresh:
+        return after, []
+
+    was: dict[str, list[str]] = {}
+    for head, body, _, _ in _blocks(before):
+        was.setdefault(head, []).append(body)
+
+    copies: dict[str, list[tuple[str, int, int]]] = {}
+    for head, body, start, end in fresh:
+        copies.setdefault(head, []).append((body, start, end))
+
+    cut: set[int] = set()
+    notes: list[str] = []
+    for head, found in copies.items():
+        if len(found) < 2 or len(was.get(head, [])) > 1:
+            continue
+        if all(len(body.splitlines()) < 2 for body, _, _ in found):
+            continue
+        old = was.get(head)
+        if old:
+            extra = [copy for copy in found if copy[0] == old[0]]
+            if len(extra) == len(found):
+                extra = extra[1:]
+        elif len({body for body, _, _ in found}) > 1:
+            continue
+        else:
+            extra = found[1:]
+        if not extra:
+            continue
+        for _, start, end in extra:
+            cut.update(range(start, end))
+        notes.append(head if len(head) <= 40 else head[:39] + "…")
+
+    if not cut:
+        return after, []
+    lines = after.splitlines(keepends=True)
+    kept = "".join(line for number, line in enumerate(lines) if number not in cut)
+    if kept.strip():
+        kept = kept.rstrip("\n") + "\n"
+    return kept, notes
+
+
 def _is_main_guard(node: ast.AST) -> bool:
     """Тот самый `if __name__ == "__main__":`."""
     if not isinstance(node, ast.If):

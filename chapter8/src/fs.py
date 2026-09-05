@@ -35,6 +35,7 @@ from chapter8.src.edits import (
     apply_append,
     apply_full,
     apply_lines,
+    drop_repeated_blocks,
     drop_repeated_imports,
     lost_definitions,
     stray_definitions,
@@ -121,6 +122,17 @@ def _commit(path: Path, before: str, after: str, action: str, replace: bool = Fa
         after, dropped = drop_repeated_imports(before, after)
         if dropped:
             action += f" (убран повтор: {', '.join(sorted(set(dropped)))})"
+
+    # То же самое, но для блоков и на любом языке: правка, принёсшая
+    # изменённую копию блока, который в файле уже был, кладётся поверх
+    # старого, а не рядом. Здесь не гадается язык — блок опознаётся
+    # по нулевому отступу (см. drop_repeated_blocks). Если после
+    # схлопывания файл перестал разбираться, значит текстовая нарезка
+    # ошиблась, и правка остаётся как была: пишем то, что проверено.
+    collapsed, blocks = drop_repeated_blocks(before, after)
+    if blocks and syntax_ok(path.name, collapsed)[0]:
+        after = collapsed
+        action += f" (лёг поверх старого: {', '.join(blocks)})"
 
     stray = stray_definitions(path.name, before, after)
     if stray and not replace:
