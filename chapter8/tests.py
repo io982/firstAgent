@@ -52,6 +52,7 @@ from chapter8.src.edits import (
     apply_lines,
     definitions,
     describe_forms,
+    drop_repeated_imports,
     edit_schema,
     filled_bodies,
     lost_definitions,
@@ -2896,6 +2897,75 @@ class TestDepsNode:
         state = started(Plan("з", []), touched=["a.py", "b.py"])
         pipeline.node_deps(state)
         assert called == ["requests"]
+
+
+class TestRepeatedImports:
+    """Импорт, который правка принесла поверх уже имевшегося, убирается.
+
+    Живой прогон, три реплики подряд: «исправь приложение», «добавь
+    выход из цикла». Каждый раз модель отвечала заменой функции и
+    каждый раз клала в ответ строку `import random`, которая в файле
+    уже была. К третьей реплике файл начинался тремя одинаковыми
+    импортами. Линтер такого не видит и видеть не может: имя
+    определено, ошибки нет.
+    """
+
+    def test_повтор_убирается(self):
+        before = "import random\n\ndef f():\n    return 1\n"
+        after = "import random\n\nimport random\n\ndef f():\n    return 2\n"
+        text, dropped = drop_repeated_imports(before, after)
+        assert dropped == ["import random"]
+        assert text == "import random\n\ndef f():\n    return 2\n"
+
+    def test_новый_импорт_остаётся(self):
+        before = "import random\n"
+        after = "import random\nimport math\n"
+        text, dropped = drop_repeated_imports(before, after)
+        assert dropped == []
+        assert text == after
+
+    def test_две_копии_нового_импорта_схлопываются(self):
+        """Модель может продублировать и то, чего в файле не было."""
+        text, dropped = drop_repeated_imports("", "import math\nimport math\nx = 1\n")
+        assert dropped == ["import math"]
+        assert text == "import math\nx = 1\n"
+
+    def test_чужой_беспорядок_не_трогается(self):
+        """Файл пришёл с двумя одинаковыми импортами — так и останется."""
+        before = "import os\nimport os\n"
+        text, dropped = drop_repeated_imports(before, before + "x = 1\n")
+        assert dropped == []
+        assert text == before + "x = 1\n"
+
+    def test_импорт_внутри_функции_не_считается(self):
+        """Отложенный импорт внутри функции — приём, а не мусор."""
+        after = "import json\n\ndef f():\n    import json\n    return json\n"
+        text, dropped = drop_repeated_imports("import json\n", after)
+        assert dropped == []
+        assert text == after
+
+    def test_разные_формы_импорта_не_путаются(self):
+        after = "import os\nfrom os import path\n"
+        text, dropped = drop_repeated_imports("import os\n", after)
+        assert dropped == []
+        assert text == after
+
+    def test_на_записи_повтор_не_доезжает_до_диска(self, workspace):
+        (workspace / "app.py").write_text("import random\n\ndef f():\n    return 1\n", encoding="utf-8")
+        answer = replace_lines("app.py", "3", "4",
+                               "import random\n\ndef f():\n    return 2\n")
+        text = (workspace / "app.py").read_text(encoding="utf-8")
+
+        assert "Заменены" in answer
+        assert text.count("import random") == 1
+
+    def test_человеку_говорят_что_убрали(self, workspace):
+        (workspace / "app.py").write_text("import random\n\ndef f():\n    return 1\n", encoding="utf-8")
+        asked = []
+        guard.set_policy(mode=guard.ASK, confirm=lambda a, d: asked.append(a) or True)
+        replace_lines("app.py", "3", "4", "import random\n\ndef f():\n    return 2\n")
+
+        assert "убран повтор" in asked[0], "снять кодом — не значит снять молча"
 
 
 class TestForgottenImports:

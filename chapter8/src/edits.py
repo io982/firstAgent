@@ -483,6 +483,61 @@ def same_tree(path: str, before: str, after: str) -> bool:
         return False
 
 
+def _top_import(line: str) -> bool:
+    """Строка верхнего уровня, которая импортирует."""
+    if line[:1].isspace():
+        return False
+    stripped = line.strip()
+    return stripped.startswith("import ") or stripped.startswith("from ")
+
+
+def drop_repeated_imports(before: str, after: str) -> tuple[str, list[str]]:
+    """Убирает копии импортов, которые правка добавила поверх уже имевшихся.
+
+    Живой прогон, три реплики подряд: «исправь приложение», «добавь
+    выход из цикла». Каждый раз модель отвечала заменой функции,
+    и каждый раз клала в ответ строку `import random`, которая в файле
+    УЖЕ была. К третьей реплике файл начинался тремя одинаковыми
+    импортами.
+
+    Линтер такого не видит и видеть не может: имя определено, ошибки
+    нет. Это не ошибка, а мусор — и убрать его код может сам, потому
+    что решение здесь вычислимое: повтор точно такой же строки импорта
+    ничего не добавляет.
+
+    Убираются только НОВЫЕ копии. Если файл пришёл к нам с двумя
+    одинаковыми импортами, они и останутся: наводить порядок в том,
+    чего агент не трогал, — не его дело.
+    """
+    kept: dict[str, int] = {}
+    for line in before.splitlines():
+        if _top_import(line):
+            kept[line.strip()] = kept.get(line.strip(), 0) + 1
+
+    seen: dict[str, int] = {}
+    out: list[str] = []
+    dropped: list[str] = []
+    lines = after.splitlines(keepends=True)
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        key = line.strip()
+        if _top_import(line):
+            seen[key] = seen.get(key, 0) + 1
+            if seen[key] > max(1, kept.get(key, 0)):
+                dropped.append(key)
+                index += 1
+                # Пустая строка сразу за выброшенным импортом уходит
+                # вместе с ним: иначе на месте повтора остаётся дыра.
+                if index < len(lines) and not lines[index].strip():
+                    index += 1
+                continue
+        out.append(line)
+        index += 1
+
+    return "".join(out), dropped
+
+
 def stray_definitions(path: str, before: str, after: str) -> list[str]:
     """Новые определения, которые правка засунула внутрь чужого блока.
 

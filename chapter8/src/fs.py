@@ -35,6 +35,7 @@ from chapter8.src.edits import (
     apply_append,
     apply_full,
     apply_lines,
+    drop_repeated_imports,
     lost_definitions,
     stray_definitions,
     syntax_ok,
@@ -111,6 +112,15 @@ def _commit(path: Path, before: str, after: str, action: str, replace: bool = Fa
             f"Правка отменена: после неё файл перестаёт разбираться ({problem}). "
             "Файл на диске не тронут."
         )
+
+    # Повтор импорта, который правка принесла поверх уже имевшегося,
+    # убирается кодом. Модель кладёт `import random` в ответ раз за
+    # разом, а линтеру сказать нечего: имя определено. Это не ошибка,
+    # а мусор, и он вычислим — см. drop_repeated_imports.
+    if path.name.endswith(".py"):
+        after, dropped = drop_repeated_imports(before, after)
+        if dropped:
+            action += f" (убран повтор: {', '.join(sorted(set(dropped)))})"
 
     stray = stray_definitions(path.name, before, after)
     if stray and not replace:
